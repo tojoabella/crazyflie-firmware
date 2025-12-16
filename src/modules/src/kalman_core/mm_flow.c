@@ -34,6 +34,27 @@ static float predictedNY;
 static float measuredNX;
 static float measuredNY;
 
+/**
+ * @file mm_flow.c
+ * @brief Optical flow measurement model for the Kalman core.
+ *
+ * - Pipeline role: projects body-frame velocities and altitude into expected pixel
+ *   motion, compensates for body rates using gyros and performs two scalar updates
+ *   (one per axis) with the innovation.
+ * - Notes on gating: saturates altitude at 0.1 m to avoid singularities.
+ */
+
+/**
+ * @brief Fuse flow sensor pixel motion into body velocities.
+ *
+ * Computes predicted pixel motion based on current velocity, altitude and body rates,
+ * constructs the Jacobians for X and Y, and forwards the residuals to
+ * @ref kalmanCoreScalarUpdate().
+ *
+ * @param this Kalman core data.
+ * @param flow Measurement packet (pixel deltas, dt, std dev).
+ * @param gyro Latest gyro measurement used for de-rotation [deg/s input converted to rad/s].
+ */
 void kalmanCoreUpdateWithFlow(kalmanCoreData_t* this, const flowMeasurement_t *flow, const Axis3f *gyro)
 {
   // Inclusion of flow measurements in the EKF done by two scalar updates

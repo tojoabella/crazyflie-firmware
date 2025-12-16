@@ -55,19 +55,67 @@
 
 #pragma once
 
+/**
+ * @file estimator_kalman.h
+ * @brief Public entry points for the Crazyflie Kalman state estimator.
+ *
+ * This header is consumed by the stabilizer task and deck drivers that need to
+ * query the EKF outside of the logging/parameter infrastructure.
+ * - Pipeline role: exposes start/stop/test hooks for the estimator task,
+ *   provides helper accessors for position/rotation and declares the main loop
+ *   function called from the stabilizer.
+ * - Key functions: @ref estimatorKalmanInit(), @ref estimatorKalman(),
+ *   @ref estimatorKalmanTaskInit(), @ref estimatorKalmanGetEstimatedPos().
+ * - Frames/units: positions returned in meters in the world frame, rotation
+ *   matrices are 3x3 row-major view of the EKF @c R matrix.
+ * - Notes: The RTOS task initialization is split between @ref estimatorKalmanTaskInit()
+ *   (called at boot) and @ref estimatorKalmanInit() (called when the estimator is
+ *   selected or reset).
+ */
+
 #include <stdint.h>
 #include "stabilizer_types.h"
 
+/**
+ * @brief Initialize the Kalman estimator state and measurement filters.
+ *
+ * Called when the estimator is activated or when a reset is requested.
+ */
 void estimatorKalmanInit(void);
+
+/**
+ * @brief Return true when the Kalman estimator task/structures have been created.
+ */
 bool estimatorKalmanTest(void);
+
+/**
+ * @brief Stabilizer facing entry point. Copies the current estimate and wakes the Kalman task.
+ *
+ * @param state Output pointer filled with the current @ref state_t.
+ * @param stabilizerStep Provides the caller's control-loop phase (unused).
+ */
 void estimatorKalman(state_t *state, const stabilizerStep_t stabilizerStep);
 
+/**
+ * @brief Allocate semaphores/mutexes and create the FreeRTOS task that runs the EKF.
+ */
 void estimatorKalmanTaskInit();
+
+/**
+ * @brief Return true when @ref estimatorKalmanTaskInit() completed successfully.
+ */
 bool estimatorKalmanTaskTest();
 
+/**
+ * @brief Convenience accessor copying the latest world-frame position estimate.
+ *
+ * @param pos Pointer populated with XYZ in meters.
+ */
 void estimatorKalmanGetEstimatedPos(point_t* pos);
 
 /**
- * Copies 9 floats representing the current state rotation matrix
+ * @brief Copy the current EKF rotation matrix (row-major 3x3) into the provided buffer.
+ *
+ * @param rotationMatrix Pointer to an array of 9 floats written row-major.
  */
 void estimatorKalmanGetEstimatedRot(float * rotationMatrix);

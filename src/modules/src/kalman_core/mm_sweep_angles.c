@@ -26,6 +26,26 @@
 #include "mm_sweep_angles.h"
 
 
+/**
+ * @file mm_sweep_angles.c
+ * @brief Lighthouse sweep angle measurement model.
+ *
+ * Converts azimuth/elevation sweeps from a base station into constraints on the
+ * Crazyflie's global position and guards them using the Lighthouse-specific outlier filter.
+ */
+
+/**
+ * @brief Fuse Lighthouse sweep angles into the EKF.
+ *
+ * Rotates the sensor location into the world frame, evaluates the measurement model
+ * for the expected sweep angle, gates the residual and computes the Jacobian in the
+ * rotor frame before mapping it back to global XYZ for @ref kalmanCoreScalarUpdate().
+ *
+ * @param this Kalman core data.
+ * @param sweepInfo Measurement packet containing geometry and measured angle.
+ * @param nowMs Current timestamp [ms] for the outlier filter.
+ * @param sweepOutlierFilterState Shared Lighthouse outlier filter context.
+ */
 void kalmanCoreUpdateWithSweepAngles(kalmanCoreData_t *this, sweepAngleMeasurement_t *sweepInfo, const uint32_t nowMs, OutlierFilterLhState_t* sweepOutlierFilterState) {
   // Rotate the sensor position from CF reference frame to global reference frame,
   // using the CF roatation matrix

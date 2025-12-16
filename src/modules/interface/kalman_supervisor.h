@@ -26,7 +26,26 @@
  * stays within bounds.
  */
 
+#pragma once
+
+/**
+ * @file kalman_supervisor.h
+ * @brief Public guard-rail interface that keeps the EKF inside reasonable bounds.
+ *
+ * - Pipeline role: @ref estimator_kalman.c calls
+ *   @ref kalmanSupervisorIsStateWithinBounds() every loop and triggers a reset
+ *   if it returns false.
+ * - Key structs: reuses @ref kalmanCoreData_t to inspect position/velocity.
+ * - Frames/units: same as @ref kalmanCoreData_t (world meters for position, body m/s for velocity).
+ */
+
 #include <stdbool.h>
 #include "kalman_core.h"
 
+/**
+ * @brief Determine if the EKF state remains inside configured position/velocity bounds.
+ *
+ * @param this Kalman core data inspected by the supervisor.
+ * @return true when everything is within limits, false otherwise (which triggers a reset).
+ */
 bool kalmanSupervisorIsStateWithinBounds(const kalmanCoreData_t* this);

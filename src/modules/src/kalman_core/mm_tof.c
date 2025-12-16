@@ -25,6 +25,20 @@
 
 #include "mm_tof.h"
 
+/**
+ * @file mm_tof.c
+ * @brief Time-of-flight distance-to-ground measurement model.
+ */
+
+/**
+ * @brief Fuse a ToF measurement that reports distance to the nearest surface under the CF.
+ *
+ * Accounts for sensor field-of-view by using the vehicle attitude to project the
+ * measured cone distance down to a world-frame Z constraint.
+ *
+ * @param this Kalman core data.
+ * @param tof Measurement packet with ToF distance and std dev.
+ */
 void kalmanCoreUpdateWithTof(kalmanCoreData_t* this, tofMeasurement_t *tof)
 {
   // Updates the filter with a measured distance in the zb direction using the

@@ -27,5 +27,15 @@
 
 #include "kalman_core.h"
 
-// Measurements of TOF from laser sensor
+/**
+ * @file mm_tof.h
+ * @brief Time-of-flight (range to planar surface) measurement model interface.
+ */
+
+/**
+ * @brief Fuse a range measurement coming from a downward-facing ToF sensor.
+ *
+ * @param this Kalman core data.
+ * @param tof Measurement packet containing sensor pose, measured distance and std dev.
+ */
 void kalmanCoreUpdateWithTof(kalmanCoreData_t* this, tofMeasurement_t *tof);

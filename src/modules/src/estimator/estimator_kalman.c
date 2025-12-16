@@ -58,6 +58,34 @@
  * 2021.03.15, Wolfgang Hoenig: Refactored queue handling
  */
 
+/**
+ * @file estimator_kalman.c
+ * @brief FreeRTOS task layer that orchestrates the Kalman core.
+ *
+ * This file bridges the OS/sensor world with the pure Kalman math in
+ * @ref kalman_core.c. It owns the Kalman task stack, the measurement queue and
+ * the shared state exported to the stabilizer loop.
+ * - Pipeline role: receives IMU and sensor packets via @ref estimatorEnqueue(),
+ *   accumulates IMU sub-samples, runs @ref kalmanCorePredict() at 100 Hz, adds
+ *   process noise every loop, forwards each measurement to its @c kalmanCoreUpdateWith*
+ *   function, finalizes/guards the state and externalizes it to the stabilizer.
+ * - Key structs: @ref kalmanCoreData_t (@c coreData) holds the EKF state, while
+ *   @c accSubSampler/gyroSubSampler gather IMU data at 1 kHz and produce 100 Hz
+ *   averages. @ref OutlierFilterTdoaState_t and @ref OutlierFilterLhState_t provide
+ *   measurement gating context.
+ * - Key functions: @ref estimatorKalmanTaskInit() (task/spinup), the static
+ *   @ref kalmanTask() loop, @ref updateQueuedMeasurements() (sensor dispatch),
+ *   @ref estimatorKalman() (stabilizer hook) and @ref estimatorKalmanInit()
+ *   (state reset).
+ * - Frames/units: sensor measurements stay in their native units/frames until
+ *   the measurement model converts them. IMU data is in body frame (g, deg/s but
+ *   converted to rad/s for the core).
+ * - Notes on timing/gating/numerics: the predict rate is clamped via
+ *   @ref rateSupervisor to 100 Hz, IMU subsampling ensures low jitter and the
+ *   kalman supervisor + @c resetEstimation parameter reset the filter when it
+ *   diverges.
+ */
+
 #include "kalman_core.h"
 #include "kalman_core_params_defaults.h"
 #include "kalman_supervisor.h"
@@ -192,7 +220,13 @@ STATIC_MEM_TASK_ALLOC_STACK_NO_DMA_CCM_SAFE(kalmanTask, KALMAN_TASK_STACKSIZE);
 
 // --------------------------------------------------
 
-// Called one time during system startup
+/**
+ * @brief Allocate and start the Kalman estimator FreeRTOS task.
+ *
+ * Creates the semaphore used to trigger the task from the stabilizer loop,
+ * initializes the mutex that protects the exported @ref state_t and spins up
+ * the dedicated @ref kalmanTask() worker.
+ */
 void estimatorKalmanTaskInit() {
   // It would be logical to set the params->attitudeReversion here, based on deck requirements, but the decks are
   // not initialized yet at this point so it is done in estimatorKalmanInit().
@@ -209,10 +243,29 @@ void estimatorKalmanTaskInit() {
   isInit = true;
 }
 
+/**
+ * @brief Return true once the Kalman task and synchronization primitives exist.
+ */
 bool estimatorKalmanTaskTest() {
   return isInit;
 }
 
+/**
+ * @brief Main EKF loop that runs in its own FreeRTOS task context.
+ *
+ * Waits for the stabilizer loop to post a semaphore, then:
+ *  1. Handles reset requests (from params or supervisor).
+ *  2. Finalizes IMU subsampling windows and runs the predict step at 100 Hz.
+ *  3. Adds process noise every loop even if predict is skipped.
+ *  4. Flushes the measurement queue, forwarding each packet to its measurement model.
+ *  5. Finalizes the state (attitude error injection) and checks supervisor bounds.
+ *  6. Copies the internal state to the shared @ref taskEstimatorState.
+ *
+ * The function runs forever and is latency sensitive; locking is minimized to the
+ * brief critical section that copies the state for the stabilizer loop.
+ *
+ * @param parameters Unused FreeRTOS task parameter.
+ */
 static void kalmanTask(void* parameters) {
   systemWaitStart();
 
@@ -240,7 +293,8 @@ static void kalmanTask(void* parameters) {
     kalmanCoreDecoupleXY(&coreData);
   #endif
 
-    // Run the system dynamics to predict the state forward.
+    // --- Predict step (100 Hz) ---
+    // IMU samples are integrated at a controlled rate using subsampled data.
     if (nowMs >= nextPredictionMs) {
       axis3fSubSamplerFinalize(&accSubSampler);
       axis3fSubSamplerFinalize(&gyroSubSampler);
@@ -255,16 +309,21 @@ static void kalmanTask(void* parameters) {
       }
     }
 
-    // Add process noise every loop, rather than every prediction
+    // --- Process noise integration ---
+    // Keeps covariance growth tied to the actual loop frequency.
     kalmanCoreAddProcessNoise(&coreData, &coreParams, nowMs);
 
+    // --- Measurement queue flush ---
+    // Consume every measurement enqueued since the previous stabilizer loop.
     updateQueuedMeasurements(nowMs, quadIsFlying);
 
+    // --- Finalize (attitude error -> quaternion) if any update happened ---
     if (kalmanCoreFinalize(&coreData))
     {
       STATS_CNT_RATE_EVENT(&finalizeCounter);
     }
 
+    // --- Supervisor guard rails ---
     if (! kalmanSupervisorIsStateWithinBounds(&coreData)) {
       resetEstimation = true;
 
@@ -274,10 +333,8 @@ static void kalmanTask(void* parameters) {
       }
     }
 
-    /**
-     * Finally, the internal state is externalized.
-     * This is done every round, since the external state includes some sensor data
-     */
+    // --- Externalize the current estimate for the stabilizer loop ---
+    // The shared state includes body-frame acceleration, so we update every loop.
     xSemaphoreTake(dataMutex, portMAX_DELAY);
     kalmanCoreExternalizeState(&coreData, &taskEstimatorState, &accLatest);
     xSemaphoreGive(dataMutex);
@@ -286,6 +343,16 @@ static void kalmanTask(void* parameters) {
   }
 }
 
+/**
+ * @brief Stabilizer hook that returns the most recent EKF state and kicks the task.
+ *
+ * Runs in the main control loop at 500 Hz. Copies the latest @ref taskEstimatorState
+ * into @p state while holding @ref dataMutex and then gives @ref runTaskSemaphore so
+ * the Kalman task can execute another loop.
+ *
+ * @param state Output pointer filled with the current state estimate.
+ * @param stabilizerStep Provides the caller's timing context (unused here).
+ */
 void estimatorKalman(state_t *state, const stabilizerStep_t stabilizerStep) {
   // This function is called from the stabilizer loop. It is important that this call returns
   // as quickly as possible. The dataMutex must only be locked short periods by the task.
@@ -298,6 +365,16 @@ void estimatorKalman(state_t *state, const stabilizerStep_t stabilizerStep) {
   xSemaphoreGive(runTaskSemaphore);
 }
 
+/**
+ * @brief Drain the measurement queue and run the associated measurement models.
+ *
+ * Called once per Kalman task loop after the process noise update. Each packet is
+ * dispatched based on @ref MeasurementType and handed off to the specialized
+ * @c kalmanCoreUpdateWith* function. Gating/outlier logic lives inside each model.
+ *
+ * @param nowMs Current timestamp [ms]; passed down to models that need it (e.g. TDoA).
+ * @param quadIsFlying Thrust flag to forward to barometer handling.
+ */
 static void updateQueuedMeasurements(const uint32_t nowMs, const bool quadIsFlying) {
   /**
    * Sensor measurements can come in sporadically and faster than the stabilizer loop frequency,
@@ -366,7 +443,13 @@ static void updateQueuedMeasurements(const uint32_t nowMs, const bool quadIsFlyi
   }
 }
 
-// Called when this estimator is activated
+/**
+ * @brief Initialize or reset the Kalman core and measurement filters.
+ *
+ * Called once when the estimator becomes active and again whenever a reset is
+ * requested (parameter or supervisor). Re-configures deck-specific parameters,
+ * clears outlier filters, resets the IMU sub-samplers and calls @ref kalmanCoreInit().
+ */
 void estimatorKalmanInit(void)
 {
   #ifdef CONFIG_DECK_LOCO_2D_POSITION
@@ -389,17 +472,28 @@ void estimatorKalmanInit(void)
   kalmanCoreInit(&coreData, &coreParams, nowMs);
 }
 
+/**
+ * @brief Report whether the Kalman estimator task infrastructure is up.
+ */
 bool estimatorKalmanTest(void)
 {
   return isInit;
 }
 
+/**
+ * @brief Convenience accessor returning the latest world-frame XYZ position.
+ */
 void estimatorKalmanGetEstimatedPos(point_t* pos) {
   pos->x = coreData.S[KC_STATE_X];
   pos->y = coreData.S[KC_STATE_Y];
   pos->z = coreData.S[KC_STATE_Z];
 }
 
+/**
+ * @brief Copy the 3x3 attitude rotation matrix from the core state.
+ *
+ * @param rotationMatrix Caller-provided buffer with room for 9 floats (row-major).
+ */
 void estimatorKalmanGetEstimatedRot(float * rotationMatrix) {
   memcpy(rotationMatrix, coreData.R, 9*sizeof(float));
 }

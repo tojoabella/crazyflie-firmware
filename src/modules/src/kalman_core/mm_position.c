@@ -25,6 +25,20 @@
 
 #include "mm_position.h"
 
+/**
+ * @file mm_position.c
+ * @brief Absolute position measurement model.
+ */
+
+/**
+ * @brief Fuse a direct measurement of XYZ position.
+ *
+ * Breaks the vector measurement into three scalar updates, one per axis, which
+ * is cheaper than building a full 3x3 innovation for the diagonal noise case.
+ *
+ * @param this Kalman core data.
+ * @param xyz Measurement packet providing global XYZ (m) and std dev.
+ */
 void kalmanCoreUpdateWithPosition(kalmanCoreData_t* this, positionMeasurement_t *xyz)
 {
   // a direct measurement of states x, y, and z

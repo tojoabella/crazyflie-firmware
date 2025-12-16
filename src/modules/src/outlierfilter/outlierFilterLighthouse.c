@@ -38,12 +38,37 @@ static const int32_t lhBadSampleWindowChangeMs = -LH_MS_PER_FRAME;
 static const int32_t lhGoodSampleWindowChangeMs = LH_MS_PER_FRAME / 2;
 static const float lhMaxError = 0.05f;
 
+/**
+ * @file outlierFilterLighthouse.c
+ * @brief Outlier rejection for Lighthouse sweep angles based on adaptive windows.
+ */
+
+/**
+ * @brief Initialize the lighthouse outlier filter state.
+ *
+ * Starts in an open window so a newly powered system can re-acquire sweeps quickly.
+ *
+ * @param this Filter state.
+ * @param nowMs Current timestamp [ms].
+ */
 void outlierFilterLighthouseReset(OutlierFilterLhState_t* this, const uint32_t nowMs) {
   this->openingTimeMs = nowMs;
   this->openingWindowMs = lhMinWindowTimeMs;
 }
 
 
+/**
+ * @brief Decide if a lighthouse sweep sample should be fused.
+ *
+ * Uses a dynamic time window that shrinks when residuals are good and expands when
+ * bad samples appear. For the first few milliseconds the filter stays open.
+ *
+ * @param this Filter state (opening window).
+ * @param distanceToBs Distance to the base station [m], used to scale error in meters.
+ * @param angleError Residual (measured - predicted) in radians.
+ * @param nowMs Current timestamp [ms].
+ * @return true if the sample should be fused.
+ */
 bool outlierFilterLighthouseValidateSweep(OutlierFilterLhState_t* this, const float distanceToBs, const float angleError, const uint32_t nowMs) {
   // float error = distanceToBs * tan(angleError);
   // We use an approximattion

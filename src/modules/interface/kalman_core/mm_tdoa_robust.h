@@ -22,5 +22,20 @@
 #include "kalman_core.h"
 #include "outlierFilterTdoa.h"
 
-// M-estimation based robust Kalman filter update for UWB TDOA measurements
+/**
+ * @file mm_tdoa_robust.h
+ * @brief Robust TDoA measurement model interface.
+ *
+ * - Pipeline role: provides the entry point for the IRLS based TDoA fusion when
+ *   `kalman.robustTdoa` is non-zero. Shares the same outlier filter context as
+ *   the standard model.
+ */
+
+/**
+ * @brief M-estimation based robust Kalman filter update for UWB TDoA measurements.
+ *
+ * @param this Kalman core data.
+ * @param tdoa Measurement packet to fuse.
+ * @param outlierFilterState Shared TDoA outlier filter context.
+ */
 void kalmanCoreRobustUpdateWithTdoa(kalmanCoreData_t* this, tdoaMeasurement_t *tdoa, OutlierFilterTdoaState_t* outlierFilterState);

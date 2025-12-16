@@ -57,6 +57,35 @@
  * 2019.04.12, Kristoffer Richardsson: Refactored, separated kalman implementation from OS related functionality
  */
 
+/**
+ * @file kalman_core.c
+ * @brief Implementation of the Crazyflie Extended Kalman Filter predict/update machinery.
+ *
+ * This file mutates @ref kalmanCoreData_t throughout the EKF loop: initialization,
+ * predict step, process noise integration, Joseph-form scalar updates, robust helper
+ * routines and finalization/externalization glue.
+ * - Pipeline role: executed from @ref estimator_kalman.c's FreeRTOS task. IMU data flows
+ *   through @ref kalmanCorePredict(), process noise is added via
+ *   @ref kalmanCoreAddProcessNoise(), sensor specific measurement models call the
+ *   @c kalmanCoreUpdateWith* helpers defined here, and @ref kalmanCoreFinalize() together
+ *   with @ref kalmanCoreExternalizeState() prepare the results for controllers/logging.
+ * - Key structs: @ref kalmanCoreData_t holds the state vector S (XYZ position in world,
+ *   body-frame velocities, attitude error), covariance matrix P, rotation matrix R and
+ *   quaternion q. @ref kalmanCoreParams_t provides process/measurement noise magnitudes,
+ *   initial positions and the attitude reversion gain used near take-off.
+ * - Key functions: @ref kalmanCoreInit(), @ref kalmanCorePredict(),
+ *   @ref kalmanCoreScalarUpdate(), @ref kalmanCoreUpdateWithPKE(),
+ *   @ref kalmanCoreAddProcessNoise(), @ref kalmanCoreFinalize(),
+ *   @ref kalmanCoreExternalizeState().
+ * - Frames/units: positions are meters in the world frame, velocities are meters-per-second
+ *   in the body frame, attitude error states are radians. Gyro inputs are rad/s, accelerometer
+ *   inputs are in g (gravity units) and timestamps use milliseconds.
+ * - Notes on timing/gating/numerics: prediction time step is derived from @c nowMs and IMU
+ *   subsampling. Scalar measurement updates use Joseph form with explicit clamping to maintain
+ *   positive semi-definite covariance. Finalization rotates the covariance when attitude errors
+ *   are injected into the quaternion.
+ */
+
 #include "kalman_core.h"
 #include "kalman_core_params_defaults.h"
 #include "cfassert.h"
@@ -70,10 +99,19 @@
 // #define DEBUG_STATE_CHECK
 
 /**
- * Supporting and utility functions
+ * @brief Supporting and utility functions used across predict/update phases.
+ *
+ * These helpers are mostly instrumentation that keep the EKF numerically healthy.
+ * They are compiled out in release builds to avoid the associated cost.
  */
 
 #ifdef DEBUG_STATE_CHECK
+/**
+ * @brief Verify that no component of the state or covariance is NaN.
+ *
+ * Called in debug builds after most math-heavy sections to catch divergence early.
+ * Triggers an ASSERT if the state vector, quaternion or covariance contains NaNs.
+ */
 static void assertStateNotNaN(const kalmanCoreData_t* this) {
   if ((isnan(this->S[KC_STATE_X])) ||
       (isnan(this->S[KC_STATE_Y])) ||
@@ -103,10 +141,7 @@ static void assertStateNotNaN(const kalmanCoreData_t* this) {
   }
 }
 #else
-static void assertStateNotNaN(const kalmanCoreData_t* this)
-{
-  return;
-}
+static void assertStateNotNaN(const kalmanCoreData_t* this) { (void)this; }
 #endif
 
 
@@ -117,6 +152,14 @@ static void assertStateNotNaN(const kalmanCoreData_t* this)
 // Small number epsilon, to prevent dividing by zero
 #define EPS (1e-6f)
 
+/**
+ * @brief Populate a @ref kalmanCoreParams_t with built-in default values.
+ *
+ * This is primarily used by the Python bindings and unit tests; in the firmware the
+ * default struct is initialized statically. Keeps firmware and host tooling in sync.
+ *
+ * @param params Output parameter structure to fill.
+ */
 __attribute__((used))
 void kalmanCoreDefaultParams(kalmanCoreParams_t* params)
 {
@@ -125,6 +168,17 @@ void kalmanCoreDefaultParams(kalmanCoreParams_t* params)
   };
 }
 
+/**
+ * @brief Reset the EKF state, covariance and housekeeping timestamps.
+ *
+ * Called once at estimator start or when the supervisor requests a reset. Seeds the
+ * state vector with initial position/yaw, zeroes velocity/attitude error, initializes
+ * the quaternion/rotation matrix, loads covariance variances and resets timing/bookkeeping.
+ *
+ * @param this Kalman core data container to clear.
+ * @param params User configurable initialization and noise parameters.
+ * @param nowMs Timestamp used to seed @c lastPredictionMs and @c lastProcessNoiseUpdateMs.
+ */
 void kalmanCoreInit(kalmanCoreData_t *this, const kalmanCoreParams_t *params, const uint32_t nowMs)
 {
   // Reset all data to 0 (like upon system reset)
@@ -182,6 +236,17 @@ void kalmanCoreInit(kalmanCoreData_t *this, const kalmanCoreParams_t *params, co
   this->lastProcessNoiseUpdateMs = nowMs;
 }
 
+/**
+ * @brief Joseph-form scalar update used by all 1-D measurement models.
+ *
+ * Computes the innovation covariance, Kalman gain and updated covariance while
+ * explicitly maintaining symmetry and bounding diagonal entries.
+ *
+ * @param this Kalman core context that stores S and P.
+ * @param Hm Measurement Jacobian row (1 x KC_STATE_DIM).
+ * @param error Innovation y = z - h(x) in sensor units.
+ * @param stdMeasNoise Standard deviation associated with the measurement noise.
+ */
 void kalmanCoreScalarUpdate(kalmanCoreData_t* this, arm_matrix_instance_f32 *Hm, float error, float stdMeasNoise)
 {
   // The Kalman gain as a column vector
@@ -207,8 +272,8 @@ void kalmanCoreScalarUpdate(kalmanCoreData_t* this, arm_matrix_instance_f32 *Hm,
   ASSERT(Hm->numRows == 1);
   ASSERT(Hm->numCols == KC_STATE_DIM);
 
-  // ====== INNOVATION COVARIANCE ======
-
+  // --- Innovation covariance (S = H P H' + R) ---
+  // Guard for degenerate Jacobians to avoid divisions by zero later.
   mat_trans(Hm, &HTm);
   mat_mult(&this->Pm, &HTm, &PHTm); // PH'
   float R = stdMeasNoise*stdMeasNoise;
@@ -218,15 +283,14 @@ void kalmanCoreScalarUpdate(kalmanCoreData_t* this, arm_matrix_instance_f32 *Hm,
   }
   ASSERT(!isnan(HPHR));
 
-  // ====== MEASUREMENT UPDATE ======
-  // Calculate the Kalman gain and perform the state update
+  // --- State update (x = x + K y) ---
   for (int i=0; i<KC_STATE_DIM; i++) {
     K[i] = PHTd[i]/HPHR; // kalman gain = (PH' (HPH' + R )^-1)
     this->S[i] = this->S[i] + K[i] * error; // state update
   }
   assertStateNotNaN(this);
 
-  // ====== COVARIANCE UPDATE ======
+  // --- Joseph-form covariance update (P = (I-KH)P(I-KH)' + KRK') ---
   mat_mult(&Km, Hm, &tmpNN1m); // KH
   for (int i=0; i<KC_STATE_DIM; i++) { tmpNN1d[KC_STATE_DIM*i+i] -= 1; } // KH - I
   mat_trans(&tmpNN1m, &tmpNN2m); // (KH - I)'
@@ -254,6 +318,19 @@ void kalmanCoreScalarUpdate(kalmanCoreData_t* this, arm_matrix_instance_f32 *Hm,
   this->isUpdated = true;
 }
 
+/**
+ * @brief Update helper that accepts pre-computed gain and weighted covariance.
+ *
+ * Used by the robust measurement models where an outer loop already produced a
+ * re-weighted @p P_w_m and @p Km. This function only applies the provided gain
+ * and copies the weighted covariance into the core data structure.
+ *
+ * @param this Kalman core context.
+ * @param Hm Measurement Jacobian row.
+ * @param Km Weighted Kalman gain (column vector).
+ * @param P_w_m Weighted covariance matrix to copy into @c this->P.
+ * @param error Innovation scalar.
+ */
 void kalmanCoreUpdateWithPKE(kalmanCoreData_t* this, arm_matrix_instance_f32 *Hm, arm_matrix_instance_f32 *Km, arm_matrix_instance_f32 *P_w_m, float error)
 {
     // kalman filter update with weighted covariance matrix P_w_m, kalman gain Km, and innovation error
@@ -291,6 +368,18 @@ void kalmanCoreUpdateWithPKE(kalmanCoreData_t* this, arm_matrix_instance_f32 *Hm
     this->isUpdated = true;
 }
 
+/**
+ * @brief Fuse barometer altitude into the global Z state.
+ *
+ * Maintains a reference height while on the ground, computes the residual between
+ * the barometer ASL reading and the world-frame Z position and forwards it to the
+ * scalar update using the configured measurement noise.
+ *
+ * @param this Kalman core data container.
+ * @param params Filter parameters providing @c measNoiseBaro.
+ * @param baroAsl Raw barometer height above sea level [m].
+ * @param quadIsFlying Used to freeze the reference while flying.
+ */
 void kalmanCoreUpdateWithBaro(kalmanCoreData_t *this, const kalmanCoreParams_t *params, float baroAsl, bool quadIsFlying)
 {
   float h[KC_STATE_DIM] = {0};
@@ -307,6 +396,21 @@ void kalmanCoreUpdateWithBaro(kalmanCoreData_t *this, const kalmanCoreParams_t *
   kalmanCoreScalarUpdate(this, &H, meas - this->S[KC_STATE_Z], params->measNoiseBaro);
 }
 
+/**
+ * @brief Integrate the quadrotor dynamics over a fixed time step.
+ *
+ * Builds the linearized system matrix A, propagates covariance with A P A', updates
+ * the state vector using measured acceleration/gyro data, integrates the quaternion,
++ * optionally blends attitude back toward the initial yaw while on the ground and marks
+ * the core data as dirty for finalization.
+ *
+ * @param this Kalman core data.
+ * @param params Process noise/attitude reversion settings.
+ * @param acc Body-frame acceleration sample [g].
+ * @param gyro Body-frame angular rate sample [rad/s].
+ * @param dt Sample period in seconds.
+ * @param quadIsFlying True if thrust is active (affects acceleration handling).
+ */
 static void predictDt(kalmanCoreData_t* this, const kalmanCoreParams_t *params, Axis3f *acc, Axis3f *gyro, float dt, bool quadIsFlying)
 {
   /* Here we discretize (euler forward) and linearise the quadrocopter dynamics in order
@@ -544,6 +648,19 @@ static void predictDt(kalmanCoreData_t* this, const kalmanCoreParams_t *params, 
   this->isUpdated = true;
 }
 
+/**
+ * @brief Predict wrapper that derives dt from timestamps before calling @ref predictDt().
+ *
+ * Converts @p nowMs to seconds, integrates the state and stores the timestamp for
+ * the next call so that IMU data is integrated at the actual sampling interval.
+ *
+ * @param this Kalman core data container.
+ * @param params Filter parameters.
+ * @param acc Body-frame acceleration [g].
+ * @param gyro Body-frame angular rate [rad/s].
+ * @param nowMs Current timestamp [ms].
+ * @param quadIsFlying True if thrust is active (affects acceleration modeling).
+ */
 void kalmanCorePredict(kalmanCoreData_t* this, const kalmanCoreParams_t *params, Axis3f *acc, Axis3f *gyro, const uint32_t nowMs, bool quadIsFlying) {
   float dt = (nowMs - this->lastPredictionMs) / 1000.0f;
   predictDt(this, params, acc, gyro, dt, quadIsFlying);
@@ -551,6 +668,17 @@ void kalmanCorePredict(kalmanCoreData_t* this, const kalmanCoreParams_t *params,
 }
 
 
+/**
+ * @brief Inflate the covariance diagonal using configured process noise over dt.
+ *
+ * Integrates acceleration/velocity/attitude noise densities across @p dt and enforces
+ * symmetry and bounds afterwards. Separating this from @ref predictDt() allows process
+ * noise to be run every estimator loop even if the predict step is slower.
+ *
+ * @param this Kalman core data.
+ * @param params Process noise parameters.
+ * @param dt Time interval in seconds since the previous call.
+ */
 static void addProcessNoiseDt(kalmanCoreData_t *this, const kalmanCoreParams_t *params, float dt)
 {
   this->P[KC_STATE_X][KC_STATE_X] += powf(params->procNoiseAcc_xy*dt*dt + params->procNoiseVel*dt + params->procNoisePos, 2);  // add process noise on position
@@ -581,6 +709,17 @@ static void addProcessNoiseDt(kalmanCoreData_t *this, const kalmanCoreParams_t *
   assertStateNotNaN(this);
 }
 
+/**
+ * @brief Public wrapper that schedules @ref addProcessNoiseDt() when time advances.
+ *
+ * Uses @c lastProcessNoiseUpdateMs to compute @p dt and guards against zero intervals.
+ * Called from the estimator loop once per cycle to keep P responsive to un-modeled
+ * accelerations between prediction calls.
+ *
+ * @param this Kalman core data.
+ * @param params Process noise settings.
+ * @param nowMs Current timestamp [ms].
+ */
 void kalmanCoreAddProcessNoise(kalmanCoreData_t *this, const kalmanCoreParams_t *params, const uint32_t nowMs) {
   float dt = (nowMs - this->lastProcessNoiseUpdateMs) / 1000.0f;
   if (dt > 0.0f) {
@@ -589,6 +728,17 @@ void kalmanCoreAddProcessNoise(kalmanCoreData_t *this, const kalmanCoreParams_t 
   }
 }
 
+/**
+ * @brief Fold accumulated attitude-error states into the quaternion and re-sync covariance.
+ *
+ * This runs after all measurements in an estimator loop. It early-outs if no updates were
+ * made, otherwise it rotates the quaternion by the small-angle attitude error, rotates the
+ * covariance using the second order approximation from Mueller et al., rebuilds the rotation
+ * matrix and resets D0/D1/D2 to zero.
+ *
+ * @param this Kalman core data.
+ * @return true if finalization modified the state, false if nothing was pending.
+ */
 bool kalmanCoreFinalize(kalmanCoreData_t* this)
 {
   // Only finalize if data is updated
@@ -712,6 +862,17 @@ bool kalmanCoreFinalize(kalmanCoreData_t* this)
   return true;
 }
 
+/**
+ * @brief Convert the internal EKF representation to the @ref state_t layout.
+ *
+ * Keeps the external API backward compatible by rotating velocities/accelerations
+ * into the world frame, removing gravity from acc.z, converting Euler angles to
+ * degrees and copying the quaternion for high-level users.
+ *
+ * @param this Kalman core data.
+ * @param state Output pointer written in-place.
+ * @param acc Latest body-frame acceleration sample (needed to form world-frame acc).
+ */
 void kalmanCoreExternalizeState(const kalmanCoreData_t* this, state_t *state, const Axis3f *acc)
 {
   // position state is already in world frame
@@ -763,6 +924,15 @@ void kalmanCoreExternalizeState(const kalmanCoreData_t* this, state_t *state, co
 
 // Reset a state to 0 with max covariance
 // If called often, this decouples the state to the rest of the filter
+/**
+ * @brief Reset one state element and zero its cross-covariances.
+ *
+ * Used by @ref kalmanCoreDecoupleXY() to decouple problematic states while keeping
+ * the rest of the filter intact.
+ *
+ * @param this Kalman core data.
+ * @param state Index of the scalar state to reset.
+ */
 static void decoupleState(kalmanCoreData_t* this, kalmanCoreStateIdx_t state)
 {
   // Set all covariance to 0
@@ -776,6 +946,12 @@ static void decoupleState(kalmanCoreData_t* this, kalmanCoreStateIdx_t state)
   this->S[state] = 0;
 }
 
+/**
+ * @brief Decouple XY position/velocity from the rest of the EKF.
+ *
+ * Resets X, PX, Y and PY and sets their covariance diagonals to the maximum value so
+ * new measurements can re-constrain them without disturbing the remaining states.
+ */
 void kalmanCoreDecoupleXY(kalmanCoreData_t* this)
 {
   decoupleState(this, KC_STATE_X);

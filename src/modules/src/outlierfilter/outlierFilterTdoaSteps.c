@@ -30,6 +30,10 @@
 #include "log.h"
 #include "debug.h"
 
+/**
+ * @file outlierFilterTdoaSteps.c
+ * @brief Legacy bucket-based TDoA outlier filter retained for fallback purposes.
+ */
 
 static bool isDistanceDiffSmallerThanDistanceBetweenAnchors(const tdoaMeasurement_t* tdoa);
 
@@ -67,6 +71,12 @@ static void addToBucket(filterLevel_t* filter);
 static void removeFromBucket(filterLevel_t* filter);
 static int updateBuckets(float errorDistance);
 
+/**
+ * @brief Deprecated bucket-based TDoA outlier filter retained for compatibility.
+ *
+ * Mimics the historical behavior where residuals were normalized and compared
+ * against multiple acceptance levels. Only used when the fallback macro is enabled.
+ */
 bool outlierFilterTdoaValidateSteps(const tdoaMeasurement_t* tdoa, const float error, const vector_t* jacobian, const point_t* estPos) {
   bool sampleIsGood = false;
 
@@ -102,29 +112,44 @@ bool outlierFilterTdoaValidateSteps(const tdoaMeasurement_t* tdoa, const float e
 }
 
 
+/**
+ * @brief Reject geometrically impossible distance differences before gating.
+ */
 static bool isDistanceDiffSmallerThanDistanceBetweenAnchors(const tdoaMeasurement_t* tdoa) {
   float anchorDistanceSq = distanceSq(&tdoa->anchorPositions[0], &tdoa->anchorPositions[1]);
   float distanceDiffSq = sq(tdoa->distanceDiff);
   return (distanceDiffSq < anchorDistanceSq);
 }
 
+/**
+ * @brief Compute squared distance between two anchors.
+ */
 static float distanceSq(const point_t* a, const point_t* b) {
   return sq(a->x - b->x) + sq(a->y - b->y) + sq(a->z - b->z);
 }
 
 
+/**
+ * @brief Increase the occupancy counter for a filter level.
+ */
 static void addToBucket(filterLevel_t* filter) {
   if (filter->bucket < MAX_BUCKET_FILL) {
     filter->bucket++;
   }
 }
 
+/**
+ * @brief Decrease the occupancy counter for a filter level.
+ */
 static void removeFromBucket(filterLevel_t* filter) {
   if (filter->bucket > 0) {
     filter->bucket--;
   }
 }
 
+/**
+ * @brief Update all bucket counters and return the index of the first active filter.
+ */
 static int updateBuckets(float errorDistance) {
   int filterIndex = FILTER_NONE;
 

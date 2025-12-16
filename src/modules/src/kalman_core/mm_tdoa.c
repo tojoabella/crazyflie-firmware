@@ -30,6 +30,32 @@
 #include "outlierFilterTdoaSteps.h"
 #endif
 
+/**
+ * @file mm_tdoa.c
+ * @brief TDoA measurement model and gating logic for the Kalman core.
+ *
+ * - Pipeline role: consumes TDoA packets from the Loco Positioning System and
+ *   fuses them into world-frame positions. Includes two outlier filters controlled
+ *   by @c CONFIG_ESTIMATOR_KALMAN_TDOA_OUTLIERFILTER_FALLBACK.
+ * - Key structs: @ref tdoaMeasurement_t, @ref OutlierFilterTdoaState_t,
+ *   @ref vector_t (Jacobian used for the legacy step filter).
+ * - Frames/units: anchor/state positions are meters in the world frame.
+ * - Notes: measurement Jacobian is the difference of normalized anchor direction
+ *   vectors; gating rejects impossible geometry and large residuals.
+ */
+
+/**
+ * @brief Fuse a UWB time-difference-of-arrival measurement.
+ *
+ * Computes the predicted distance difference from the current state, builds the
+ * Jacobian for XYZ, runs the configured outlier filter to gate impossible residuals
+ * and forwards the innovation to @ref kalmanCoreScalarUpdate().
+ *
+ * @param this Kalman core data.
+ * @param tdoa Measurement packet.
+ * @param nowMs Timestamp used by the integrator-based outlier filter.
+ * @param outlierFilterState Integrator/legacy filter context shared across updates.
+ */
 void kalmanCoreUpdateWithTdoa(kalmanCoreData_t* this, tdoaMeasurement_t *tdoa, const uint32_t nowMs, OutlierFilterTdoaState_t* outlierFilterState)
 {
   /**

@@ -25,7 +25,23 @@
 
 #include "mm_absolute_height.h"
 
-// Measurement model where the measurement is the absolute height
+/**
+ * @file mm_absolute_height.c
+ * @brief Absolute height measurement model.
+ *
+ * - Pipeline role: connects VL53/VL6180 deck readings or similar to the world Z state.
+ * - Key structs: @ref heightMeasurement_t (height [m], std dev).
+ */
+
+/**
+ * @brief Measurement model where the measurement is the absolute height.
+ *
+ * Builds a Jacobian that only maps to the Z state and performs a scalar update with
+ * the measured height residual.
+ *
+ * @param this Kalman core data.
+ * @param height Height measurement packet.
+ */
 void kalmanCoreUpdateWithAbsoluteHeight(kalmanCoreData_t* this, heightMeasurement_t* height) {
   float h[KC_STATE_DIM] = {0};
   arm_matrix_instance_f32 H = {1, KC_STATE_DIM, h};

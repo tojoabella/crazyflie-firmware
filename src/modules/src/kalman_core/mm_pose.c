@@ -26,6 +26,20 @@
 #include "mm_pose.h"
 #include "math3d.h"
 
+/**
+ * @file mm_pose.c
+ * @brief Pose (position + orientation) measurement model.
+ */
+
+/**
+ * @brief Fuse a world-frame pose measurement (xyz + quaternion).
+ *
+ * Treats position as three independent scalar updates and injects the quaternion
+ * residual as small-angle attitude errors (Rodrigues parameters).
+ *
+ * @param this Kalman core data.
+ * @param pose Pose measurement packet.
+ */
 void kalmanCoreUpdateWithPose(kalmanCoreData_t* this, poseMeasurement_t *pose)
 {
   // a direct measurement of states x, y, and z, and orientation

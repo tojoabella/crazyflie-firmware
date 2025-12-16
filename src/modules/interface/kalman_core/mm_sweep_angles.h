@@ -28,5 +28,17 @@
 #include "kalman_core.h"
 #include "outlierFilterLighthouse.h"
 
-// Measurement of sweep angles from a Lighthouse base station
+/**
+ * @file mm_sweep_angles.h
+ * @brief Lighthouse sweep angle measurement model interface.
+ */
+
+/**
+ * @brief Fuse Lighthouse sweep angle measurements (azimuth/elevation) into the EKF.
+ *
+ * @param this Kalman core data.
+ * @param angles Measurement packet containing sweep geometry/angles.
+ * @param nowMs Current timestamp [ms] used by the outlier filter.
+ * @param sweepOutlierFilterState Gating state for lighthouse sweeps.
+ */
 void kalmanCoreUpdateWithSweepAngles(kalmanCoreData_t *this, sweepAngleMeasurement_t *angles, const uint32_t nowMs, OutlierFilterLhState_t* sweepOutlierFilterState);

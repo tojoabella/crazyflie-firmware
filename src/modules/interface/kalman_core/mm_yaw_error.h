@@ -27,5 +27,15 @@
 
 #include "kalman_core.h"
 
-// Measurement of yaw error (outside measurement Vs current estimation)
+/**
+ * @file mm_yaw_error.h
+ * @brief Measurement model for external yaw-error corrections (e.g., Lighthouse).
+ */
+
+/**
+ * @brief Fuse an external yaw error estimate into the attitude error states.
+ *
+ * @param this Kalman core data.
+ * @param error Yaw error measurement packet (difference between external yaw and EKF yaw).
+ */
 void kalmanCoreUpdateWithYawError(kalmanCoreData_t *this, yawErrorMeasurement_t *error);

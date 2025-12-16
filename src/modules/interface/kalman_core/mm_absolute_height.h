@@ -27,5 +27,18 @@
 
 #include "kalman_core.h"
 
-// Absolute height measurement along the room Z
+/**
+ * @file mm_absolute_height.h
+ * @brief Measurement model for deck-based absolute height sensors (e.g., VL53/VL6180).
+ *
+ * - Pipeline role: ties the world-frame Z state to the deck-referenced height measurement.
+ * - Key structs: @ref heightMeasurement_t contains measured height and std dev.
+ */
+
+/**
+ * @brief Fuse an absolute height measurement along the global Z axis.
+ *
+ * @param this Kalman core data.
+ * @param height Height measurement packet (meters, std dev).
+ */
 void kalmanCoreUpdateWithAbsoluteHeight(kalmanCoreData_t* this, heightMeasurement_t* height);

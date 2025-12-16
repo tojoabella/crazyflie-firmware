@@ -26,6 +26,21 @@
  * stays within bounds.
  */
 
+/**
+ * @file kalman_supervisor.c
+ * @brief Safety net that detects runaway EKF states and requests resets.
+ *
+ * - Pipeline role: called from @ref kalmanTask() after every measurement cycle.
+ *   If any position or velocity component exceeds a configurable bound, the task
+ *   sets @c resetEstimation and the core state is re-initialized.
+ * - Key structs: reuses @ref kalmanCoreData_t to inspect position/velocity,
+ *   exposes @c maxPosition and @c maxVelocity as parameters under the `kalman`
+ *   group so operators can tighten/loosen guard rails.
+ * - Frames/units: positions are interpreted in the world frame [m], velocities
+ *   are body-frame [m/s].
+ * - Notes: bounds can be disabled by setting them to 0.0f (no supervision).
+ */
+
 #include "kalman_supervisor.h"
 
 #include "param.h"
@@ -34,6 +49,12 @@
 float maxPosition = 100; //meters
 float maxVelocity = 10; //meters per second
 
+/**
+ * @brief Check whether the EKF position/velocity states are inside configured bounds.
+ *
+ * @param this Kalman core data.
+ * @return false if any XYZ position exceeds +/-maxPos or any body velocity exceeds +/-maxVel.
+ */
 bool kalmanSupervisorIsStateWithinBounds(const kalmanCoreData_t* this) {
   for (int i = 0; i < 3; i++) {
     if (maxPosition > 0.0f) {

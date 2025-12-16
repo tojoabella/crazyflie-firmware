@@ -27,5 +27,29 @@
 
 #include "kalman_core.h"
 
-// Distance-to-point measurements
+/**
+ * @file mm_distance.h
+ * @brief TWR distance measurement model interface for the Kalman core.
+ *
+ * - Pipeline role: converts @ref distanceMeasurement_t packets (range to a known anchor)
+ *   into scalar EKF updates. Called from @ref estimator_kalman.c when the localization
+ *   service enqueues `MeasurementTypeDistance`.
+ * - Key structs: uses @ref distanceMeasurement_t (anchor coordinates, measured distance,
+ *   standard deviation).
+ * - Key functions: @ref kalmanCoreUpdateWithDistance().
+ * - Frames/units: anchor coordinates and Crazyflie position are expressed in the global
+ *   frame [m]; distances are meters.
+ * - Notes on gating: relies on anchor geometry (derivative of range equation); invalid
+ *   Jacobians are avoided by falling back to unit vectors when predicted range is zero.
+ */
+
+/**
+ * @brief Fuse a single range measurement toward a known anchor into the EKF position.
+ *
+ * Builds the Jacobian from the current state to the measured distance and feeds it to
+ * @ref kalmanCoreScalarUpdate().
+ *
+ * @param this Kalman core data.
+ * @param d Distance measurement (anchor position, measured range and std dev).
+ */
 void kalmanCoreUpdateWithDistance(kalmanCoreData_t* this, distanceMeasurement_t *d);

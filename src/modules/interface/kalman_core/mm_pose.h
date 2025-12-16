@@ -27,5 +27,15 @@
 
 #include "kalman_core.h"
 
-// Direct measurements of Crazyflie pose
+/**
+ * @file mm_pose.h
+ * @brief Pose (position + quaternion) measurement model interface.
+ */
+
+/**
+ * @brief Fuse a full pose measurement (XYZ + quaternion) into the EKF.
+ *
+ * @param this Kalman core data.
+ * @param pose Measurement packet containing position, quaternion and std devs.
+ */
 void kalmanCoreUpdateWithPose(kalmanCoreData_t* this, poseMeasurement_t *pose);

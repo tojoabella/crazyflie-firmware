@@ -27,5 +27,21 @@
 
 #include "kalman_core.h"
 
-// Measurements of flow (dnx, dny)
+/**
+ * @file mm_flow.h
+ * @brief Optical flow measurement model interface.
+ *
+ * - Pipeline role: consumes @ref flowMeasurement_t packets coming from the PMW3901 deck,
+ *   converts them to world-frame velocity constraints and runs two scalar updates.
+ * - Key structs: @ref flowMeasurement_t (pixel deltas, dt, std dev) and @ref Axis3f gyro
+ *   sample for yaw-rate de-rotation.
+ */
+
+/**
+ * @brief Fuse optical flow pixel deltas into the EKF velocity states.
+ *
+ * @param this Kalman core data.
+ * @param flow Optical flow measurement (pixel deltas per frame).
+ * @param gyro Most recent gyro sample (rad/s) for body rotation compensation.
+ */
 void kalmanCoreUpdateWithFlow(kalmanCoreData_t* this, const flowMeasurement_t *flow, const Axis3f *gyro);

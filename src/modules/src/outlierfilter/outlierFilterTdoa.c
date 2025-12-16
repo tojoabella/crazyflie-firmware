@@ -28,6 +28,13 @@
 #include "outlierFilterTdoa.h"
 #include "stabilizer_types.h"
 
+/**
+ * @file outlierFilterTdoa.c
+ * @brief Adaptive integrator-based gate for UWB TDoA measurements.
+ *
+ * Tracks residual statistics across recent samples to decide when to accept or
+ * reject incoming measurements. Keeps the EKF from chasing impossible geometry.
+ */
 
 static bool isDistanceDiffSmallerThanDistanceBetweenAnchors(const tdoaMeasurement_t* tdoa);
 
@@ -50,12 +57,24 @@ static const float INTEGRATOR_FORCE_OPEN_LEVEL = INTEGRATOR_SIZE * 0.1f;
 static const float INTEGRATOR_RESUME_ACTION_LEVEL = INTEGRATOR_SIZE * 0.9f;
 
 
+/**
+ * @brief Reset the TDoA outlier filter back to its open state.
+ */
 void outlierFilterTdoaReset(OutlierFilterTdoaState_t* this) {
   this->integrator = 0.0f;
   this->isFilterOpen = true;
   this->latestUpdateMs = 0;
 }
 
+/**
+ * @brief Validate a TDoA measurement using the integrator-based gate.
+ *
+ * @param this Filter state that keeps integrator and window information.
+ * @param tdoa Measurement metadata (std dev, anchor layout).
+ * @param error Innovation (measurement - predicted) [m].
+ * @param nowMs Current timestamp [ms].
+ * @return true if the measurement should be fused.
+ */
 bool outlierFilterTdoaValidateIntegrator(OutlierFilterTdoaState_t* this, const tdoaMeasurement_t* tdoa, const float error, const uint32_t nowMs) {
   // The accepted error when the filter is closed
   const float acceptedDistance = tdoa->stdDev * 2.5f;
@@ -106,10 +125,16 @@ bool outlierFilterTdoaValidateIntegrator(OutlierFilterTdoaState_t* this, const t
 
 static float sq(float a) {return a * a;}
 
+/**
+ * @brief Helper computing squared distance between two anchors.
+ */
 static float distanceSq(const point_t* a, const point_t* b) {
   return sq(a->x - b->x) + sq(a->y - b->y) + sq(a->z - b->z);
 }
 
+/**
+ * @brief Reject geometrically impossible TDoA measurements before running statistics.
+ */
 static bool isDistanceDiffSmallerThanDistanceBetweenAnchors(const tdoaMeasurement_t* tdoa) {
   float anchorDistanceSq = distanceSq(&tdoa->anchorPositions[0], &tdoa->anchorPositions[1]);
   float distanceDiffSq = sq(tdoa->distanceDiff);

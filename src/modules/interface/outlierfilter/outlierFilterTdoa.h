@@ -32,5 +32,26 @@ typedef struct {
     bool isFilterOpen;
 } OutlierFilterTdoaState_t;
 
+/**
+ * @file outlierFilterTdoa.h
+ * @brief Adaptive integrator-based gate for TDoA residuals.
+ *
+ * - Pipeline role: called before each TDoA update to decide if the sample is usable.
+ * - Key structs: @ref OutlierFilterTdoaState_t tracks the integrator and open/closed status.
+ */
+
+/**
+ * @brief Reset the integrator/outlier filter state to its open state.
+ */
 void outlierFilterTdoaReset(OutlierFilterTdoaState_t* this);
+
+/**
+ * @brief Decide if a TDoA measurement should be fused based on residual statistics.
+ *
+ * @param this Filter state (integrator and gating thresholds).
+ * @param tdoa Measurement metadata (std dev, anchor positions).
+ * @param error Innovation (measured - predicted) [m].
+ * @param nowMs Current timestamp [ms].
+ * @return true if the measurement passes gating, false otherwise.
+ */
 bool outlierFilterTdoaValidateIntegrator(OutlierFilterTdoaState_t* this, const tdoaMeasurement_t* tdoa, const float error, const uint32_t nowMs);

@@ -27,5 +27,15 @@
 
 #include "kalman_core.h"
 
-// Direct measurements of Crazyflie position
+/**
+ * @file mm_position.h
+ * @brief Absolute XYZ measurement model interface (e.g., MoCap positions).
+ */
+
+/**
+ * @brief Fuse a direct position measurement in the world frame.
+ *
+ * @param this Kalman core data.
+ * @param xyz Measurement packet providing XYZ in meters and std dev.
+ */
 void kalmanCoreUpdateWithPosition(kalmanCoreData_t* this, positionMeasurement_t *xyz);

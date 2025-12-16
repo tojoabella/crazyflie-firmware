@@ -30,4 +30,18 @@
 // This code is kept here for a while to make it possible to switch back to the "old" outlier filter if the new one is
 // not performing well.
 
+/**
+ * @file outlierFilterTdoaSteps.h
+ * @brief Deprecated bucket/step based TDoA outlier filter interface.
+ */
+
+/**
+ * @brief Legacy TDoA gating logic based on step-wise buckets.
+ *
+ * @param tdoa Measurement metadata.
+ * @param error Innovation [m].
+ * @param jacobian Measurement Jacobian used to normalize the error.
+ * @param estPos Current position estimate (unused except for documentation).
+ * @return true when the measurement should be fused.
+ */
 bool outlierFilterTdoaValidateSteps(const tdoaMeasurement_t* tdoa, const float error, const vector_t* jacobian, const point_t* estPos);

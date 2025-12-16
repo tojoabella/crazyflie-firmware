@@ -17,6 +17,20 @@
  *
  */
 
+/**
+ * @file mm_tdoa_robust.c
+ * @brief Robust TDoA measurement model (IRLS + G-M weighting).
+ *
+ * - Pipeline role: alternative to @ref mm_tdoa.c enabled when `kalman.robustTdoa`
+ *   is non-zero. Mitigates biased measurements and high-leverage outliers before
+ *   feeding the EKF.
+ * - Key functions: @ref kalmanCoreRobustUpdateWithTdoa(), helper Cholesky and
+ *   weighting functions mirroring @ref mm_distance_robust.c.
+ * - Frames/units: world-frame positions in meters, distance differences in meters.
+ * - Notes: uses the same @ref OutlierFilterTdoaState_t gating as the standard model
+ *   before running the robust math.
+ */
+
 #include "mm_tdoa_robust.h"
 #include "test_support.h"
 
@@ -24,8 +38,15 @@
 #define UPPER_BOUND (100)
 #define LOWER_BOUND (-100)
 
-// Cholesky Decomposition for a nxn psd matrix (from scratch)
-// Reference: https://www.geeksforgeeks.org/cholesky-decomposition-matrix-decomposition/
+/**
+ * @brief Local Cholesky decomposition implementation used in the IRLS loop.
+ *
+ * Reference: https://www.geeksforgeeks.org/cholesky-decomposition-matrix-decomposition/
+ *
+ * @param n Matrix dimension.
+ * @param matrix Input PSD matrix.
+ * @param lower Output lower triangular factor such that matrix = L L^T.
+ */
 static void Cholesky_Decomposition(int n, float matrix[n][n],  float lower[n][n]){
     // Decomposing a matrix into Lower Triangular
     for (int i = 0; i < n; i++) {
@@ -52,19 +73,41 @@ static void Cholesky_Decomposition(int n, float matrix[n][n],  float lower[n][n]
  * a large measurement uncertainty.
  * Intuitively, a small sigma means you trust the measurements more.
 */
+/**
+ * @brief Compute the G-M weight for measurement residuals.
+ *
+ * @param e Residual.
+ * @param GM_e Output weight.
+ */
 static void GM_UWB(float e, float * GM_e){
     float sigma = 2.0;
     float GM_dn = sigma + e*e;
     *GM_e = (sigma * sigma)/(GM_dn * GM_dn);
 }
 
+/**
+ * @brief Compute the G-M weight for the state residual.
+ *
+ * @param e State residual.
+ * @param GM_e Output weight.
+ */
 static void GM_state(float e, float * GM_e){
     float sigma = 1.5;
     float GM_dn = sigma + e*e;
     *GM_e = (sigma * sigma)/(GM_dn * GM_dn);
 }
 
-// robsut update function
+/**
+ * @brief Robust TDoA update that iteratively re-weights the covariance and gain.
+ *
+ * Runs up to @c MAX_ITER iterations where measurement/state residuals are mapped
+ * through G-M weights. The resulting weighted covariance is passed to
+ * @ref kalmanCoreUpdateWithPKE().
+ *
+ * @param this Kalman core data.
+ * @param tdoa Measurement packet to fuse.
+ * @param outlierFilterState Shared TDoA outlier filter context.
+ */
 void kalmanCoreRobustUpdateWithTdoa(kalmanCoreData_t* this, tdoaMeasurement_t *tdoa, OutlierFilterTdoaState_t* outlierFilterState)
 {
     // Measurement equation:
@@ -140,6 +183,7 @@ void kalmanCoreRobustUpdateWithTdoa(kalmanCoreData_t* this, tdoaMeasurement_t *t
         memcpy(X_state, this->S, sizeof(X_state));                     // copy Xpr to X_State and then update in each iterations
 
         // ---------------------- Start iteration ----------------------- //
+        // Each loop recomputes residuals/weights and re-inflates P/R before the final update.
         for (int iter = 0; iter < MAX_ITER; iter++){
             // cholesky decomposition for the prior covariance matrix
             Cholesky_Decomposition(KC_STATE_DIM, P_iter, P_chol);      // P_chol is a lower triangular matrix

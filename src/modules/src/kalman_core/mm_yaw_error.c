@@ -25,6 +25,20 @@
 
 #include "mm_yaw_error.h"
 
+/**
+ * @file mm_yaw_error.c
+ * @brief Measurement model for external yaw corrections.
+ */
+
+/**
+ * @brief Fuse an error between the EKF yaw and an external yaw reference.
+ *
+ * Injects the yaw error directly into the attitude error state D2 so that the
+ * next finalization step rotates the quaternion accordingly.
+ *
+ * @param this Kalman core data.
+ * @param error Yaw error measurement packet.
+ */
 void kalmanCoreUpdateWithYawError(kalmanCoreData_t *this, yawErrorMeasurement_t *error)
 {
     float h[KC_STATE_DIM] = {0};

@@ -16,6 +16,23 @@
  * \endverbatim
  *
  */
+
+/**
+ * @file mm_distance_robust.c
+ * @brief Robust two-way-ranging measurement model with iterative reweighting.
+ *
+ * - Pipeline role: alternative to @ref mm_distance.c that mitigates non-Gaussian UWB
+ *   outliers using G-M cost functions and iterative reweighting. Called from
+ *   @ref estimator_kalman.c when `robustTwr` is enabled.
+ * - Key structs: consumes @ref distanceMeasurement_t and uses a private set of matrices
+ *   to run Cholesky, weighting and inverse operations without extra allocations.
+ * - Key functions: @ref kalmanCoreRobustUpdateWithDistance() plus helper routines for
+ *   Cholesky decomposition and G-M weighting.
+ * - Frames/units: same as the standard distance model (world-frame meters).
+ * - Notes on gating/numerics: clamps the Cholesky factor to prevent NaNs, limits the
+ *   number of IRLS iterations (MAX_ITER) and falls back to standard update once the
+ *   weighted covariance is produced.
+ */
 #include "mm_distance_robust.h"
 #include "test_support.h"
 
@@ -23,8 +40,16 @@
 #define UPPER_BOUND (100)
 #define LOWER_BOUND (-100)
 
-// Cholesky Decomposition for a nxn psd matrix (from scratch)
-// Reference: https://www.geeksforgeeks.org/cholesky-decomposition-matrix-decomposition/
+/**
+ * @brief Bare-bones Cholesky decomposition for a positive semi-definite matrix.
+ *
+ * Re-implements the factorization locally to avoid pulling in extra dependencies.
+ * The result is a lower-triangular matrix such that @p matrix = L L^T.
+ *
+ * @param n Matrix dimension (KC_STATE_DIM).
+ * @param matrix Input PSD matrix (modified only through reading).
+ * @param lower Output lower triangular factor.
+ */
 static void Cholesky_Decomposition(int n, float matrix[n][n],  float lower[n][n]){
     // Decomposing a matrix into Lower Triangular 
     for (int i = 0; i < n; i++) { 
@@ -51,19 +76,47 @@ static void Cholesky_Decomposition(int n, float matrix[n][n],  float lower[n][n]
  * a large measurement uncertainty. 
  * Intuitively, a small sigma means you trust the measurements more.
 */
+/**
+ * @brief Compute the G-M weight for a measurement residual.
+ *
+ * Smaller sigma increases robustness (assumes better prior). Used to scale
+ * the measurement covariance when large residuals are detected.
+ *
+ * @param e Normalized measurement residual.
+ * @param GM_e Output weight.
+ */
 static void GM_UWB(float e, float * GM_e){
     float sigma = 1.5;                        
     float GM_dn = sigma + e*e;
     *GM_e = (sigma * sigma)/(GM_dn * GM_dn);
 }
 
+/**
+ * @brief Compute the G-M weight for the state residual used in IRLS.
+ *
+ * Controls how aggressively the prior covariance is inflated based on the
+ * current error-state magnitude.
+ *
+ * @param e State residual.
+ * @param GM_e Output weight.
+ */
 static void GM_state(float e, float * GM_e){
     float sigma = 2.0;                       
     float GM_dn = sigma + e*e;
     *GM_e = (sigma * sigma)/(GM_dn * GM_dn);
 }
 
-// robsut update function
+/**
+ * @brief Robust M-estimation-based update for TWR measurements.
+ *
+ * Runs a short Iteratively Re-weighted Least Squares loop (max 2 iterations) where
+ * the distance residual and state residual are passed through G-M weight functions.
+ * The weighted covariance and Kalman gain are then fed to
+ * @ref kalmanCoreUpdateWithPKE().
+ *
+ * @param this Kalman core data.
+ * @param d Distance measurement packet.
+ */
 void kalmanCoreRobustUpdateWithDistance(kalmanCoreData_t* this, distanceMeasurement_t *d)
 {
     float dx = this->S[KC_STATE_X] - d->x;
@@ -125,6 +178,7 @@ void kalmanCoreRobustUpdateWithDistance(kalmanCoreData_t* this, distanceMeasurem
     memcpy(X_state, this->S, sizeof(X_state));
 
     // ---------------------- Start iteration ----------------------- //
+    // Each pass recomputes the residuals and weights, effectively scaling P and R.
     for (int iter = 0; iter < MAX_ITER; iter++){
         // cholesky decomposition for the prior covariance matrix 
         Cholesky_Decomposition(KC_STATE_DIM, P_iter, P_chol);          // P_chol is a lower triangular matrix

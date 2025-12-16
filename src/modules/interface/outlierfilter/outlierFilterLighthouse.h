@@ -31,5 +31,26 @@ typedef struct {
     int32_t openingWindowMs;
 } OutlierFilterLhState_t;
 
+/**
+ * @file outlierFilterLighthouse.h
+ * @brief Adaptive gate for Lighthouse sweep residuals.
+ */
+
+/**
+ * @brief Gate a sweep angle measurement based on recent residual history.
+ *
+ * @param this Filter state.
+ * @param distanceToBs Distance to the base station [m].
+ * @param angleError Residual angle [rad].
+ * @param nowMs Timestamp [ms].
+ * @return true if the measurement is accepted.
+ */
 bool outlierFilterLighthouseValidateSweep(OutlierFilterLhState_t* this, const float distanceToBs, const float angleError, const uint32_t nowMs);
+
+/**
+ * @brief Reset the lighthouse outlier filter to its initial opening window.
+ *
+ * @param this Filter state.
+ * @param nowMs Current timestamp [ms].
+ */
 void outlierFilterLighthouseReset(OutlierFilterLhState_t* this, const uint32_t nowMs);

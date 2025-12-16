@@ -25,7 +25,30 @@
 
 #include "mm_distance.h"
 
-// Measurement model where the measurement is the distance to a known point in space
+/**
+ * @file mm_distance.c
+ * @brief Scalar measurement update for two-way ranging (TWR) distances.
+ *
+ * - Pipeline role: maps range-to-anchor measurements to the world-frame XYZ states.
+ *   Called whenever @ref estimator_kalman.c dequeues `MeasurementTypeDistance`.
+ * - Key structs: consumes @ref distanceMeasurement_t describing anchor coordinates
+ *   and observed range.
+ * - Key functions: @ref kalmanCoreUpdateWithDistance().
+ * - Frames/units: anchor/state operands are in the world frame [m], measurement noise
+ *   is meters.
+ * - Notes: Jacobian degeneracy (anchor collocated with the state) is avoided by
+ *   substituting a unit vector so the filter still gets a direction to move toward.
+ */
+
+/**
+ * @brief Measurement model where the measurement is the distance to a known point in space.
+ *
+ * Computes the current predicted distance, its derivative w.r.t. XYZ and performs a
+ * scalar update with the innovation (measured - predicted).
+ *
+ * @param this Kalman core data.
+ * @param d Distance measurement packet (anchor position, observed distance, std dev).
+ */
 void kalmanCoreUpdateWithDistance(kalmanCoreData_t* this, distanceMeasurement_t* d) {
   // a measurement of distance to point (x, y, z)
   float h[KC_STATE_DIM] = {0};

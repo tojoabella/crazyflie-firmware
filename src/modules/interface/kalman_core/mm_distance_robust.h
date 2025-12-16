@@ -21,5 +21,20 @@
 
 #include "kalman_core.h"
 
-// M-estimation based robust Kalman filter update for UWB TWR measurements
+/**
+ * @file mm_distance_robust.h
+ * @brief Public interface for the robust TWR measurement model.
+ *
+ * - Pipeline role: used when the `kalman.robustTwr` parameter is non-zero to fuse
+ *   distance measurements using IRLS and G-M weighting (see @ref mm_distance_robust.c).
+ * - Key structs: @ref distanceMeasurement_t (anchor position, measured distance).
+ * - Notes on frames/units: meters in the world frame, same as the standard distance model.
+ */
+
+/**
+ * @brief M-estimation based robust Kalman filter update for UWB TWR measurements.
+ *
+ * @param this Kalman core data.
+ * @param d Distance measurement packet to fuse.
+ */
 void kalmanCoreRobustUpdateWithDistance(kalmanCoreData_t* this, distanceMeasurement_t *d); 
