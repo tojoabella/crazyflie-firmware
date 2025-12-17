@@ -1,3 +1,21 @@
+/**
+ * @file estimator.c
+ * @brief Estimator front-end that multiplexes between implementations and funnels sensor data.
+ *
+ * Responsibilities:
+ * - Own the measurement queue shared between sensor/deck drivers and the active estimator.
+ * - Provide the `stateEstimator*` API used by the stabilizer task to initialize, switch and run
+ *   complementary, Kalman, UKF or out-of-tree estimators.
+ * - Expose helper enqueue/dequeue functions that let any producer push `measurement_t` packets
+ *   without knowing which backend is selected.
+ * - Emit eventtrigger hooks and statistics for logging/monitoring when measurements arrive or
+ *   are dropped.
+ *
+ * Directory context: files under `src/modules/src/estimator/` share this interface. Each concrete
+ * estimator (e.g. `estimator_kalman.c`) implements the math/RTOS behavior, while this file provides
+ * the glue that keeps the system running regardless of which estimator is enabled.
+ */
+
 #include "stm32fxxx.h"
 #include "FreeRTOS.h"
 #include "queue.h"
@@ -100,11 +118,26 @@ static EstimatorFcns estimatorFunctions[] = {
 #endif
 };
 
+/**
+ * @brief Create the measurement queue and start the requested estimator backend.
+ *
+ * Called during system init from the stabilizer code path.
+ *
+ * @param estimator Requested estimator type (auto-select resolves to default build option).
+ */
 void stateEstimatorInit(StateEstimatorType estimator) {
   measurementsQueue = STATIC_MEM_QUEUE_CREATE(measurementsQueue);
   stateEstimatorSwitchTo(estimator);
 }
 
+/**
+ * @brief Switch to a new estimator implementation at runtime.
+ *
+ * Deinitializes the previous backend, respects build-time forced estimators and
+ * keeps `currentEstimator` updated.
+ *
+ * @param estimator Desired estimator type or auto-select.
+ */
 void stateEstimatorSwitchTo(StateEstimatorType estimator) {
   if (estimator < 0 || estimator >= StateEstimatorType_COUNT) {
     return;
@@ -140,6 +173,9 @@ void stateEstimatorSwitchTo(StateEstimatorType estimator) {
   DEBUG_PRINT("Using %s (%d) estimator\n", stateEstimatorGetName(), currentEstimator);
 }
 
+/**
+ * @brief Return the currently active estimator type.
+ */
 StateEstimatorType stateEstimatorGetType(void) {
   return currentEstimator;
 }
@@ -156,19 +192,38 @@ static void deinitEstimator(const StateEstimatorType estimator) {
   }
 }
 
+/**
+ * @brief Run the active estimator's self-test hook.
+ */
 bool stateEstimatorTest(void) {
   return estimatorFunctions[currentEstimator].test();
 }
 
+/**
+ * @brief Invoke the active estimator update function.
+ *
+ * Called from the stabilizer loop once per control step.
+ */
 void stateEstimator(state_t *state, const stabilizerStep_t tick) {
   estimatorFunctions[currentEstimator].update(state, tick);
 }
 
+/**
+ * @brief Human-readable name of the active estimator.
+ */
 const char* stateEstimatorGetName() {
   return estimatorFunctions[currentEstimator].name;
 }
 
 
+/**
+ * @brief Push a measurement into the shared queue.
+ *
+ * Thread-safe helper used by drivers and tasks. Dispatches to the correct FreeRTOS
+ * queue API depending on context and updates stats/event triggers.
+ *
+ * @param measurement Measurement packet to enqueue.
+ */
 void estimatorEnqueue(const measurement_t *measurement) {
   if (!measurementsQueue) {
     return;
@@ -255,6 +310,14 @@ void estimatorEnqueue(const measurement_t *measurement) {
   }
 }
 
+/**
+ * @brief Pop the oldest measurement from the queue (non-blocking).
+ *
+ * Called from estimator implementations (`estimator_kalman.c`) inside their worker tasks.
+ *
+ * @param measurement Output pointer filled if an entry is available.
+ * @return true when a measurement was dequeued.
+ */
 bool estimatorDequeue(measurement_t *measurement) {
   return pdTRUE == xQueueReceive(measurementsQueue, measurement, 0);
 }
