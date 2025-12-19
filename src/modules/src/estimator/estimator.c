@@ -74,6 +74,10 @@ typedef struct {
 
 #define NOT_IMPLEMENTED ((void*)0)
 
+/**
+ * Note: it follows the order of StateEstimatorType enum
+ * 
+ */
 static EstimatorFcns estimatorFunctions[] = {
     {
         .init = NOT_IMPLEMENTED,

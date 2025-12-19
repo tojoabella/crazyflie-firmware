@@ -17,10 +17,10 @@ kalmanTask()  # FreeRTOS task created in estimatorKalmanTaskInit()
   ├─ axis3fSubSamplerAccumulate() via MeasurementType{Gyro,Acc} packets
   ├─ kalmanCorePredict() at 100 Hz (PREDICT_RATE)
   ├─ kalmanCoreAddProcessNoise() each loop
-  ├─ updateQueuedMeasurements()             # drains queue and dispatches measurement models
-  ├─ kalmanCoreFinalize()                   # moves attitude error, rebuilds rotation matrix
-  ├─ kalmanSupervisorIsStateWithinBounds()  # checks that position/velocity stay inside safe envelopes
-  └─ kalmanCoreExternalizeState()           # copies state into taskEstimatorState
+  ├─ updateQueuedMeasurements(), kalmanCoreUpdateWith*() # drains queue and dispatches measurement models
+  ├─ kalmanCoreFinalize()                                # moves attitude error, rebuilds rotation matrix
+  ├─ kalmanSupervisorIsStateWithinBounds()               # checks that position/velocity stay inside safe envelopes
+  └─ kalmanCoreExternalizeState()                        # copies state into taskEstimatorState
 ```
 
 ## Loop phases inside `kalmanTask()`

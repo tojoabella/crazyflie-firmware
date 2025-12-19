@@ -65,25 +65,56 @@
  * This file bridges the OS/sensor world with the pure Kalman math in
  * @ref kalman_core.c. It owns the Kalman task stack, the measurement queue and
  * the shared state exported to the stabilizer loop.
- * - Pipeline role: receives IMU and sensor packets via @ref estimatorEnqueue(),
- *   accumulates IMU sub-samples, runs @ref kalmanCorePredict() at 100 Hz, adds
- *   process noise every loop, forwards each measurement to its @c kalmanCoreUpdateWith*
- *   function, finalizes/guards the state and externalizes it to the stabilizer.
- * - Key structs: @ref kalmanCoreData_t (@c coreData) holds the EKF state, while
- *   @c accSubSampler/gyroSubSampler gather IMU data at 1 kHz and produce 100 Hz
- *   averages. @ref OutlierFilterTdoaState_t and @ref OutlierFilterLhState_t provide
- *   measurement gating context.
+ * - Pipeline role: creates the kalmanTask() (see pipeline.md for details) FreeRTOS task, which loops at 100 Hz
+ *  depending on kalmanTaskSignal, updating the internal coreData state and then copying a simpler view to
+ *  publishedEstimatorState, for consumption by the stabilizer loop (500 Hz) via estimatorKalman().
  * - Key functions: @ref estimatorKalmanTaskInit() (task/spinup), the static
  *   @ref kalmanTask() loop, @ref updateQueuedMeasurements() (sensor dispatch),
  *   @ref estimatorKalman() (stabilizer hook) and @ref estimatorKalmanInit()
  *   (state reset).
- * - Frames/units: sensor measurements stay in their native units/frames until
- *   the measurement model converts them. IMU data is in body frame (g, deg/s but
- *   converted to rad/s for the core).
  * - Notes on timing/gating/numerics: the predict rate is clamped via
  *   @ref rateSupervisor to 100 Hz, IMU subsampling ensures low jitter and the
  *   kalman supervisor + @c resetEstimation parameter reset the filter when it
  *   diverges.
+ * 
+ * ## Task entrypoint visibility: why `kalmanTask()` is `static`
+ *
+ * The FreeRTOS worker that runs the EKF is implemented as the file-local function
+ * `kalmanTask(void* parameters)`. It is declared `static` to give it **internal
+ * linkage** (file scope visibility): no other translation unit can call it, and
+ * it is not part of the public estimator API. This prevents accidental direct
+ * invocation from other modules and makes it explicit that the only intended
+ * caller is the RTOS scheduler.
+ *
+ * Even though `kalmanTask()` is `static`, it is still used as a FreeRTOS task
+ * entrypoint by registering its function pointer during initialization:
+ * `estimatorKalmanTaskInit()` creates the synchronization primitives and creates
+ * the task (via `STATIC_MEM_TASK_CREATE(...)`) with `kalmanTask` as the entry
+ * function. From then on, the scheduler owns the execution of `kalmanTask()`.
+ *
+ * ## How `kalmanTask()` connects to the stabilizer loop (`estimatorKalman()`)
+ *
+ * This module splits estimator work into two cooperating contexts:
+ *
+ * - `estimatorKalman(state_t* state, ...)` runs in the **stabilizer/control loop**
+ *   (high-rate, latency-sensitive). It:
+ *     1) acquires the mutex guarding the published estimator output,
+ *     2) copies the most recent published estimate into `*state`,
+ *     3) releases the mutex,
+ *     4) signals the Kalman task to run another iteration (gives the run/wakeup
+ *        semaphore).
+ *
+ * - `kalmanTask(void* parameters)` runs in its own **FreeRTOS task context**
+ *   (compute-heavy). It blocks waiting for the run/wakeup semaphore; when signaled,
+ *   it performs one estimator iteration (predict + queued measurement updates +
+ *   finalize), then publishes the updated estimate by writing to the shared
+ *   `state_t` snapshot while holding the same mutex.
+ *
+ * Summary of roles:
+ *  - estimatorKalmanTaskInit(): creates RTOS primitives and starts kalmanTask()
+ *  - kalmanTask(): RTOS-owned worker loop (private; static).  Is the *producer worker* (compute + publish)
+ *  - estimatorKalman(): stabilizer-facing hook (public API) that reads the
+ *    published state and triggers the worker
  */
 
 #include "kalman_core.h"
@@ -133,12 +164,12 @@
 
 
 // Semaphore to signal that we got data from the stabilizer loop to process
-static SemaphoreHandle_t runTaskSemaphore;
+static SemaphoreHandle_t kalmanTaskSignal;
 
 // Mutex to protect data that is shared between the task and
 // functions called by the stabilizer loop
-static SemaphoreHandle_t dataMutex;
-static StaticSemaphore_t dataMutexBuffer;
+static SemaphoreHandle_t publishedEstimatorStateMutex;
+static StaticSemaphore_t publishedEstimatorStateMutexBuffer;
 
 
 /**
@@ -167,6 +198,11 @@ static bool robustTdoa = false;
  * For more information, refer to the paper
  */
 
+ /**
+  * kalmanCoreData_t coreData is the INTERNAL EKF state used by the Kalman task. It evolves during kalmanTask()
+  * - Has state vector (position, velocity-ish terms, attitude error, biases/auxiliary states), 
+  *  covariance matrix, rotation matrix and quaternion.
+  */
 NO_DMA_CCM_SAFE_ZERO_INIT static kalmanCoreData_t coreData;
 
 /**
@@ -192,7 +228,11 @@ static kalmanCoreParams_t coreParams = {
 };
 
 // Data used to enable the task and stabilizer loop to run with minimal locking
-static state_t taskEstimatorState; // The estimator state produced by the task, copied to the stabilizer when needed.
+/**
+ * state_t publishedEstimatorState is the EXTERNAL "exported view" of coreData.
+ * Export happens at the end of each kalmanTask() iteration
+ */
+static state_t publishedEstimatorState; // The estimator state produced by the task, copied to the stabilizer when needed.
 
 // Statistics
 #define ONE_SECOND 1000
@@ -223,9 +263,9 @@ STATIC_MEM_TASK_ALLOC_STACK_NO_DMA_CCM_SAFE(kalmanTask, KALMAN_TASK_STACKSIZE);
 /**
  * @brief Allocate and start the Kalman estimator FreeRTOS task.
  *
- * Creates the semaphore used to trigger the task from the stabilizer loop,
- * initializes the mutex that protects the exported @ref state_t and spins up
- * the dedicated @ref kalmanTask() worker.
+ * - Creates the semaphore used to trigger the task from the stabilizer loop
+ * - Initializes the mutex that protects @ref state_t 
+ * - Spins up the @ref kalmanTask() worker.
  */
 void estimatorKalmanTaskInit() {
   // It would be logical to set the params->attitudeReversion here, based on deck requirements, but the decks are
@@ -233,10 +273,10 @@ void estimatorKalmanTaskInit() {
 
   // Created in the 'empty' state, meaning the semaphore must first be given, that is it will block in the task
   // until released by the stabilizer loop
-  runTaskSemaphore = xSemaphoreCreateBinary();
-  ASSERT(runTaskSemaphore);
+  kalmanTaskSignal = xSemaphoreCreateBinary();
+  ASSERT(kalmanTaskSignal);
 
-  dataMutex = xSemaphoreCreateMutexStatic(&dataMutexBuffer);
+  publishedEstimatorStateMutex = xSemaphoreCreateMutexStatic(&publishedEstimatorStateMutexBuffer);
 
   STATIC_MEM_TASK_CREATE(kalmanTask, kalmanTask, KALMAN_TASK_NAME, NULL, KALMAN_TASK_PRI);
 
@@ -259,7 +299,8 @@ bool estimatorKalmanTaskTest() {
  *  3. Adds process noise every loop even if predict is skipped.
  *  4. Flushes the measurement queue, forwarding each packet to its measurement model.
  *  5. Finalizes the state (attitude error injection) and checks supervisor bounds.
- *  6. Copies the internal state to the shared @ref taskEstimatorState.
+ *  6. Copies the internal state to the shared @ref publishedEstimatorState.
+ *  7. Loops back to wait for the next semaphore from the stabilizer.
  *
  * The function runs forever and is latency sensitive; locking is minimized to the
  * brief critical section that copies the state for the stabilizer loop.
@@ -275,7 +316,7 @@ static void kalmanTask(void* parameters) {
   rateSupervisorInit(&rateSupervisorContext, nowMs, ONE_SECOND, PREDICT_RATE - 1, PREDICT_RATE + 1, 1);
 
   while (true) {
-    xSemaphoreTake(runTaskSemaphore, portMAX_DELAY);
+    xSemaphoreTake(kalmanTaskSignal, portMAX_DELAY);
     nowMs = T2M(xTaskGetTickCount()); // would be nice if this had a precision higher than 1ms...
 
     if (resetEstimation) {
@@ -289,9 +330,9 @@ static void kalmanTask(void* parameters) {
     bool quadIsFlying = supervisorIsFlying();
     #endif
 
-  #ifdef KALMAN_DECOUPLE_XY
-    kalmanCoreDecoupleXY(&coreData);
-  #endif
+    #ifdef KALMAN_DECOUPLE_XY
+      kalmanCoreDecoupleXY(&coreData);
+    #endif
 
     // --- Predict step (100 Hz) ---
     // IMU samples are integrated at a controlled rate using subsampled data.
@@ -333,36 +374,44 @@ static void kalmanTask(void* parameters) {
       }
     }
 
-    // --- Externalize the current estimate for the stabilizer loop ---
+    // --- Externalize the current estimate from coreData to publishedEstimatorState for the stabilizer loop ---
     // The shared state includes body-frame acceleration, so we update every loop.
-    xSemaphoreTake(dataMutex, portMAX_DELAY);
-    kalmanCoreExternalizeState(&coreData, &taskEstimatorState, &accLatest);
-    xSemaphoreGive(dataMutex);
+    // Note: the mutex is used to WRITE to publishedEstimatorState, while the stabilizer (estimatorKalman()) READS from it.
+    xSemaphoreTake(publishedEstimatorStateMutex, portMAX_DELAY);
+    kalmanCoreExternalizeState(&coreData, &publishedEstimatorState, &accLatest);
+    xSemaphoreGive(publishedEstimatorStateMutex);
 
     STATS_CNT_RATE_EVENT(&updateCounter);
   }
 }
 
 /**
- * @brief Stabilizer hook that returns the most recent EKF state and kicks the task.
+ * @brief Stabilizer hook that reads the most recent EKF state and wakes up kalmanTask().
  *
- * Runs in the main control loop at 500 Hz. Copies the latest @ref taskEstimatorState
- * into @p state while holding @ref dataMutex and then gives @ref runTaskSemaphore so
- * the Kalman task can execute another loop.
+ * Runs in the main control loop at 500 Hz. 
+ * 
+ * Note: this is a consumer of publishedEstimatorState, while kalmanTask() is a producer.
+ * 
+ * Note: the stabilizer loop runs faster (500 Hz) than the Kalman predict step (100 Hz).
+ * This is to ensure that the stabilizer always has fresh state to work with, even if 
+ * the Kalman task is delayed for some reason. The Kalman task will simply skip predict
+ * steps as needed to catch up. That's also why estimatorKalman() and kalmanTask() are 
+ * separated by a semaphore.
  *
  * @param state Output pointer filled with the current state estimate.
  * @param stabilizerStep Provides the caller's timing context (unused here).
  */
 void estimatorKalman(state_t *state, const stabilizerStep_t stabilizerStep) {
   // This function is called from the stabilizer loop. It is important that this call returns
-  // as quickly as possible. The dataMutex must only be locked short periods by the task.
-  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  // as quickly as possible. The publishedEstimatorStateMutex must only be locked short periods by the task.
+  // Note: the mutex is used to READ from publishedEstimatorState, while the kalman task WRITES to it.
+  xSemaphoreTake(publishedEstimatorStateMutex, portMAX_DELAY);
 
   // Copy the latest state, calculated by the task
-  memcpy(state, &taskEstimatorState, sizeof(state_t));
-  xSemaphoreGive(dataMutex);
+  memcpy(state, &publishedEstimatorState, sizeof(state_t));
+  xSemaphoreGive(publishedEstimatorStateMutex);
 
-  xSemaphoreGive(runTaskSemaphore);
+  xSemaphoreGive(kalmanTaskSignal);
 }
 
 /**
