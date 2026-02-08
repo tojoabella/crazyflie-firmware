@@ -62,53 +62,39 @@
  * @file estimator_kalman.c
  * @brief FreeRTOS task layer that orchestrates the Kalman core.
  *
- * This file bridges the OS/sensor world with the pure Kalman math in
- * @ref kalman_core.c. It owns the Kalman task stack, the measurement queue and
- * the shared state exported to the stabilizer loop.
- * - Pipeline role: creates the kalmanTask() (see pipeline.md for details) FreeRTOS task, which loops at 100 Hz
- *  depending on kalmanTaskSignal, updating the internal coreData state and then copying a simpler view to
- *  publishedEstimatorState, for consumption by the stabilizer loop (500 Hz) via estimatorKalman().
- * - Key functions: @ref estimatorKalmanTaskInit() (task/spinup), the static
- *   @ref kalmanTask() loop, @ref updateQueuedMeasurements() (sensor dispatch),
- *   @ref estimatorKalman() (stabilizer hook) and @ref estimatorKalmanInit()
- *   (state reset).
- * - Notes on timing/gating/numerics: the predict rate is clamped via
- *   @ref rateSupervisor to 100 Hz, IMU subsampling ensures low jitter and the
- *   kalman supervisor + @c resetEstimation parameter reset the filter when it
- *   diverges.
+ * Main EKF file. This file bridges the OS/sensor world with the pure Kalman math in
+ * @ref kalman_core.c. It continually drains the measurement queue to update the estimated 
+ * state (kalmanTask), then makes it available to the stabilizer loop.
  * 
- * ## Task entrypoint visibility: why `kalmanTask()` is `static`
+ * - Pipeline: kalmanTask() FreeRTOS task continually loops, 
+ *   updating the internal coreData state and then copying a simpler view to
+ *   publishedEstimatorState, for consumption by the stabilizer loop (500 Hz) via estimatorKalman().
  *
- * The FreeRTOS worker that runs the EKF is implemented as the file-local function
- * `kalmanTask(void* parameters)`. It is declared `static` to give it **internal
- * linkage** (file scope visibility): no other translation unit can call it, and
- * it is not part of the public estimator API. This prevents accidental direct
- * invocation from other modules and makes it explicit that the only intended
- * caller is the RTOS scheduler.
- *
- * Even though `kalmanTask()` is `static`, it is still used as a FreeRTOS task
- * entrypoint by registering its function pointer during initialization:
- * `estimatorKalmanTaskInit()` creates the synchronization primitives and creates
- * the task (via `STATIC_MEM_TASK_CREATE(...)`) with `kalmanTask` as the entry
- * function. From then on, the scheduler owns the execution of `kalmanTask()`.
- *
- * ## How `kalmanTask()` connects to the stabilizer loop (`estimatorKalman()`)
  *
  * This module splits estimator work into two cooperating contexts:
  *
- * - `estimatorKalman(state_t* state, ...)` runs in the **stabilizer/control loop**
+ * - `estimatorKalman()` runs in the **stabilizer/control loop**
  *   (high-rate, latency-sensitive). It:
- *     1) acquires the mutex guarding the published estimator output,
- *     2) copies the most recent published estimate into `*state`,
+ *     1) acquires the mutex guarding the estimator's simple snapshot of the state,
+ *     2) copies the state
  *     3) releases the mutex,
- *     4) signals the Kalman task to run another iteration (gives the run/wakeup
- *        semaphore).
+ *     4) releases the kalmanTask mutex, signaling it to run another state estimation update
  *
- * - `kalmanTask(void* parameters)` runs in its own **FreeRTOS task context**
- *   (compute-heavy). It blocks waiting for the run/wakeup semaphore; when signaled,
- *   it performs one estimator iteration (predict + queued measurement updates +
- *   finalize), then publishes the updated estimate by writing to the shared
- *   `state_t` snapshot while holding the same mutex.
+ * - `kalmanTask()` runs in its own **FreeRTOS task context**
+ *   (compute-heavy). It:
+ *     1) blocks waiting for the run/wakeup semaphore; when signaled,
+ *     2) performs one estimator iteration (predict + queued measurement updates + finalize)
+ *     3) acquires the mutex for the simple snapshot, publishes the updated estimate, releases the mutex
+ * 
+ * Since estimatorKalman is faster than kalmanTask, the copied state doesn't change every time
+ * estimatorKalman is called, but only when kalmanTask has completed another iteration.
+
+ * ## Task entrypoint visibility: why `kalmanTask()` is `static`
+ *
+ * The FreeRTOS worker that runs the EKF is implemented as the file-local function
+ * `kalmanTask()`. It is declared `static` to give it file-only visibility: no other 
+ * translation unit can call it, it is not part of the public estimator API. 
+ * Explicit that the only intended caller is the RTOS scheduler.
  *
  * Summary of roles:
  *  - estimatorKalmanTaskInit(): creates RTOS primitives and starts kalmanTask()
@@ -229,10 +215,10 @@ static kalmanCoreParams_t coreParams = {
 
 // Data used to enable the task and stabilizer loop to run with minimal locking
 /**
- * state_t publishedEstimatorState is the EXTERNAL "exported view" of coreData.
- * Export happens at the end of each kalmanTask() iteration
+ * publishedEstimatorState is a simplified view of coreData.
+ * publishedEstimatorState update happens at the end of each kalmanTask() iteration
  */
-static state_t publishedEstimatorState; // The estimator state produced by the task, copied to the stabilizer when needed.
+static state_t publishedEstimatorState;
 
 // Statistics
 #define ONE_SECOND 1000
@@ -387,8 +373,6 @@ static void kalmanTask(void* parameters) {
 
 /**
  * @brief Stabilizer hook that reads the most recent EKF state and wakes up kalmanTask().
- *
- * Runs in the main control loop at 500 Hz. 
  * 
  * Note: this is a consumer of publishedEstimatorState, while kalmanTask() is a producer.
  * 
@@ -518,7 +502,7 @@ void estimatorKalmanInit(void)
   outlierFilterLighthouseReset(&sweepOutlierFilterState, 0);
 
   uint32_t nowMs = T2M(xTaskGetTickCount());
-  kalmanCoreInit(&coreData, &coreParams, nowMs);
+  kalmanCoreInit(&coreData, &coreParams, nowMs); // see kalman_core.[h,c]. Initializes coreData
 }
 
 /**

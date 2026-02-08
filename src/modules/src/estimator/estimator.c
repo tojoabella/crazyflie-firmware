@@ -6,10 +6,8 @@
  * - Own the measurement queue shared between sensor/deck drivers and the active estimator.
  * - Provide the `stateEstimator*` API used by the stabilizer task to initialize, switch and run
  *   complementary, Kalman, UKF or out-of-tree estimators.
- * - Expose helper enqueue/dequeue functions that let any producer push `measurement_t` packets
- *   without knowing which backend is selected.
- * - Emit eventtrigger hooks and statistics for logging/monitoring when measurements arrive or
- *   are dropped.
+ * - Expose helper enqueue/dequeue functions that let any producer push `measurement_t` packets without knowing which backend is selected.
+ * - Emit eventtrigger hooks and statistics for logging/monitoring when measurements arrive or are dropped.
  *
  * Directory context: files under `src/modules/src/estimator/` share this interface. Each concrete
  * estimator (e.g. `estimator_kalman.c`) implements the math/RTOS behavior, while this file provides
@@ -75,7 +73,8 @@ typedef struct {
 #define NOT_IMPLEMENTED ((void*)0)
 
 /**
- * Note: it follows the order of StateEstimatorType enum
+ * Note: Ordering of this list follows the order of StateEstimatorType enum
+ * Note: estimatorKalman functions are defined in estimator_kalman.h
  * 
  */
 static EstimatorFcns estimatorFunctions[] = {
