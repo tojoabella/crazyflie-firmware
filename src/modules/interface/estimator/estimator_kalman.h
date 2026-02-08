@@ -80,6 +80,7 @@
  * @brief Initialize the Kalman estimator state and measurement filters.
  *
  * Called when the estimator is activated or when a reset is requested.
+ * Used in estimatorFunctions[] in estimator.c.
  */
 void estimatorKalmanInit(void);
 

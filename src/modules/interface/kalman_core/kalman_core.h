@@ -178,10 +178,10 @@ void kalmanCoreDefaultParams(kalmanCoreParams_t *params);
 /**
  * @brief Initialize the Kalman core state vector, covariance and timestamps.
  *
- * Zeros the @ref kalmanCoreData_t structure, seeds position and yaw from @p params,
+ * Zeros the @ref kalmanCoreData_t structure, seeds y and yaw from @p params,
  * sets the initial quaternion/rotation matrix and initializes the covariance diagonal
- * to the configured variances. Called from @ref estimatorKalmanInit() on startup and
- * every time the supervisor requests a reset.
+ * to the configured variances. Called from @ref estimatorKalmanInit() (estimator_kalman.[h,c])
+ * on startup and every time the supervisor requests a reset.
  *
  * @param this Kalman core data container to initialize.
  * @param params User configurable start state and noise parameters.
