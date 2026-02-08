@@ -23,6 +23,28 @@
  *
  *
  */
+
+/**
+ * @file stabilizer.c
+ * @brief Main stabilizer loop orchestrating sensors, state estimation, control, and motor output.
+ *
+ * Responsibilities:
+ * - Run the high-priority stabilizer FreeRTOS task at 1 kHz, synchronizing to sensor data readiness.
+ * - Initialize and coordinate subsystems: sensors, state estimator, controller, power distribution,
+ *   motors, and collision avoidance.
+ * - Acquire sensor data each tick and pass it through the state estimator to produce the current state.
+ * - Obtain setpoints from the commander (including high-level trajectory commands) and let the
+ *   supervisor and collision avoidance modules modify them for safety.
+ * - Invoke the active controller to compute control outputs (thrust, roll/pitch/yaw moments).
+ * - Distribute control signals to motors via power distribution with battery voltage compensation.
+ * - Provide a rate supervisor task that monitors loop timing and asserts on stalls for safety.
+ * - Expose logging variables for telemetry (state estimates, sensor readings, controller targets,
+ *   motor outputs) and parameters to switch estimator/controller types at runtime.
+ *
+ * The stabilizer is the central real-time loop of the flight firmware. All time-critical flight
+ * control decisions flow through this module. Safety-critical sections are clearly marked in code
+ * to warn developers about the consequences of modifications.
+ */
 #define DEBUG_MODULE "STAB"
 
 #include <math.h>
@@ -124,12 +146,27 @@ STATIC_MEM_TASK_ALLOC(rateSupervisorTask, RATE_SUPERVISOR_TASK_STACKSIZE);
 static void stabilizerTask(void* param);
 static void rateSupervisorTask(void* param);
 
+/**
+ * @brief Compute the latency from sensor interrupt to motor output.
+ *
+ * Used for performance monitoring and debugging. The result is exposed via the
+ * `stabilizer.intToOut` log variable.
+ *
+ * @param sensorData Pointer to sensor data containing the interrupt timestamp.
+ */
 static void calcSensorToOutputLatency(const sensorData_t *sensorData)
 {
   uint64_t outTimestamp = usecTimestamp();
   inToOutLatency = outTimestamp - sensorData->interruptTimestamp;
 }
 
+/**
+ * @brief Compress the current state estimate into integer representations.
+ *
+ * Converts floating-point state values (position, velocity, acceleration,
+ * attitude quaternion, angular rates) into scaled int16/int32 formats for
+ * bandwidth-efficient logging via the `stateEstimateZ` log group.
+ */
 static void compressState()
 {
   stateCompressed.x = state.position.x * 1000.0f;
@@ -157,6 +194,13 @@ static void compressState()
   stateCompressed.rateYaw = sensorData.gyro.z * deg2millirad;
 }
 
+/**
+ * @brief Compress the current setpoint into integer representations.
+ *
+ * Converts floating-point setpoint values (position, velocity, acceleration)
+ * into scaled int16 formats for bandwidth-efficient logging via the
+ * `ctrltargetZ` log group.
+ */
 static void compressSetpoint()
 {
   setpointCompressed.x = setpoint.position.x * 1000.0f;
@@ -172,6 +216,15 @@ static void compressSetpoint()
   setpointCompressed.az = setpoint.acceleration.z * 1000.0f;
 }
 
+/**
+ * @brief Initialize the stabilizer and all flight-control subsystems.
+ *
+ * Called once during system startup. Initializes sensors, state estimator,
+ * controller, power distribution, motors, and collision avoidance. Creates
+ * the stabilizer FreeRTOS task that runs the main control loop.
+ *
+ * @param estimator Requested estimator type (auto-select uses the build default).
+ */
 void stabilizerInit(StateEstimatorType estimator)
 {
   if(isInit)
@@ -191,6 +244,14 @@ void stabilizerInit(StateEstimatorType estimator)
   isInit = true;
 }
 
+/**
+ * @brief Run self-tests on all stabilizer subsystems.
+ *
+ * Invokes the test functions for sensors, state estimator, controller,
+ * power distribution, motors, and collision avoidance.
+ *
+ * @return true if all subsystem tests pass, false otherwise.
+ */
 bool stabilizerTest(void)
 {
   bool pass = true;
@@ -205,6 +266,16 @@ bool stabilizerTest(void)
   return pass;
 }
 
+/**
+ * @brief Apply battery voltage compensation to motor thrust commands.
+ *
+ * Uses a low-pass filtered battery voltage to scale motor thrusts, compensating
+ * for voltage sag under load and ensuring consistent thrust output as the
+ * battery discharges.
+ *
+ * @param motorThrustUncapped       Input thrust values before compensation.
+ * @param motorThrustBatCompUncapped Output thrust values after battery compensation.
+ */
 static void batteryCompensation(const motors_thrust_uncapped_t* motorThrustUncapped, motors_thrust_uncapped_t* motorThrustBatCompUncapped)
 {
   // Low pass on the BatteryVoltage
@@ -218,6 +289,11 @@ static void batteryCompensation(const motors_thrust_uncapped_t* motorThrustUncap
   }
 }
 
+/**
+ * @brief Set PWM ratios for all four motors.
+ *
+ * @param motorPwm Pointer to structure containing PWM values for each motor.
+ */
 static void setMotorRatios(const motors_thrust_pwm_t* motorPwm)
 {
   motorsSetRatio(MOTOR_M1, motorPwm->motors.m1);
@@ -226,6 +302,12 @@ static void setMotorRatios(const motors_thrust_pwm_t* motorPwm)
   motorsSetRatio(MOTOR_M4, motorPwm->motors.m4);
 }
 
+/**
+ * @brief Handle runtime switching of estimator or controller types.
+ *
+ * Checks if the user-requested estimator or controller type (set via parameters)
+ * differs from the currently active one, and performs the switch if needed.
+ */
 static void updateStateEstimatorAndControllerTypes() {
   if (stateEstimatorGetType() != estimatorType) {
     stateEstimatorSwitchTo(estimatorType);
@@ -238,6 +320,14 @@ static void updateStateEstimatorAndControllerTypes() {
   }
 }
 
+/**
+ * @brief Log a warning when motor thrust commands are saturated.
+ *
+ * Rate-limited to avoid spamming the debug output. Only active when
+ * CONFIG_LOG_MOTOR_CAP_WARNING is enabled.
+ *
+ * @param isCapped true if any motor thrust was capped this cycle.
+ */
 static void logCapWarning(const bool isCapped) {
   #ifdef CONFIG_LOG_MOTOR_CAP_WARNING
   static uint32_t nextReportTick = 0;
@@ -252,6 +342,14 @@ static void logCapWarning(const bool isCapped) {
   #endif
 }
 
+/**
+ * @brief Convert control commands to motor outputs and apply them.
+ *
+ * Performs power distribution (mapping thrust/torques to individual motors),
+ * battery voltage compensation, PWM capping, and finally sets the motor ratios.
+ *
+ * @param control Pointer to the control structure with thrust and moments.
+ */
 static void controlMotors(const control_t* control) {
   powerDistribution(control, &motorThrustUncapped);
   batteryCompensation(&motorThrustUncapped, &motorThrustBatCompUncapped);
@@ -260,6 +358,16 @@ static void controlMotors(const control_t* control) {
   setMotorRatios(&motorPwm);
 }
 
+/**
+ * @brief FreeRTOS task that monitors the stabilizer loop rate.
+ *
+ * Waits on a semaphore signaled by the stabilizer task each iteration. If the
+ * semaphore is not given within a timeout, the stabilizer is considered stalled
+ * and an assertion fires to trigger a safe shutdown (motors stop). This provides
+ * a watchdog-like safety mechanism for the critical control loop.
+ *
+ * @param pvParameters Unused FreeRTOS task parameter.
+ */
 void rateSupervisorTask(void *pvParameters) {
   while (1) {
     // Wait for the semaphore to be given by the stabilizerTask
@@ -323,7 +431,7 @@ static void stabilizerTask(void* param)
     } else {
       updateStateEstimatorAndControllerTypes();
 
-      stateEstimator(&state, stabilizerStep);
+      stateEstimator(&state, stabilizerStep); // if you look at estimatorKalman, stabilizerStep is unused
 
       const bool areMotorsAllowedToRun = supervisorAreMotorsAllowedToRun();
 
