@@ -26,10 +26,10 @@ stabilizerTask()  [1 kHz, runs in FreeRTOS task "STAB"]
   └─ sensorsAcquire(&sensorData)         # Read IMU, enqueue accel/gyro measurements
   └─ stateEstimator(&state, stabilizerStep)  # Get latest state estimate
        └─ estimatorKalman(&state, step)  # Dispatch to Kalman backend
-            ├─ xSemaphoreTake(dataMutex)
-            ├─ memcpy(state, &taskEstimatorState)  # Copy latest state (non-blocking)
-            ├─ xSemaphoreGive(dataMutex)
-            └─ xSemaphoreGive(runTaskSemaphore)    # Wake Kalman task
+            ├─ xSemaphoreTake(publishedEstimatorStateMutex)
+            ├─ memcpy(state, &publishedEstimatorState)  # Copy latest state (non-blocking)
+            ├─ xSemaphoreGive(publishedEstimatorStateMutex)
+            └─ xSemaphoreGive(kalmanTaskSignal)    # Wake Kalman task
   └─ commanderGetSetpoint(&setpoint)     # Get desired position/velocity/attitude
   └─ controller(&control, &setpoint, &sensorData, &state)  # Run PID controller
   └─ powerDistribution(&control)         # Compute motor PWM commands
@@ -39,7 +39,7 @@ stabilizerTask()  [1 kHz, runs in FreeRTOS task "STAB"]
 
 ```
 kalmanTask()  [FreeRTOS task "ESTM", runs ~250-500 Hz depending on measurement load]
-  └─ xSemaphoreTake(runTaskSemaphore)    # Wait for stabilizer to signal or timeout
+  └─ xSemaphoreTake(kalmanTaskSignal)    # Wait for stabilizer to signal or timeout
 
   # 1. IMU Subsampling and Prediction (100 Hz)
   ├─ if (accel/gyro measurements in queue):
@@ -72,9 +72,9 @@ kalmanTask()  [FreeRTOS task "ESTM", runs ~250-500 Hz depending on measurement l
   │    └─ resetEstimation = true  # Trigger re-init on next iteration
 
   # 6. Export State to Stabilizer
-  ├─ xSemaphoreTake(dataMutex)
-  ├─ kalmanCoreExternalizeState(&coreData, &taskEstimatorState)  # Copy to shared state
-  └─ xSemaphoreGive(dataMutex)
+  ├─ xSemaphoreTake(publishedEstimatorStateMutex)
+  ├─ kalmanCoreExternalizeState(&coreData, &publishedEstimatorState)  # Copy to shared state
+  └─ xSemaphoreGive(publishedEstimatorStateMutex)
 ```
 
 **Summary**:
@@ -297,8 +297,8 @@ void kalmanCoreExternalizeState(kalmanCoreData_t* coreData, state_t* state, Axis
 - `state->attitudeQuaternion` (quaternion, world → body rotation)
 
 **Thread Safety**:
-- Protected by `dataMutex` semaphore
-- Stabilizer loop reads this state via `estimatorKalman()` which also takes `dataMutex`
+- Protected by `publishedEstimatorStateMutex` semaphore
+- Stabilizer loop reads this state via `estimatorKalman()` which also takes `publishedEstimatorStateMutex`
 - Copy is fast (<1µs), no blocking concerns
 
 ---
@@ -357,8 +357,8 @@ while (estimatorDequeue(&m)) {  // Non-blocking, returns false if queue empty
    - **Fast path**: Enqueue only (no processing), return to caller quickly
 
 **Synchronization**:
-- `runTaskSemaphore`: Stabilizer signals Kalman task to wake
-- `dataMutex`: Protects shared `taskEstimatorState` during read/write
+- `kalmanTaskSignal`: Stabilizer signals Kalman task to wake
+- `publishedEstimatorStateMutex`: Protects shared `publishedEstimatorState` during read/write
 - Queue: Implicit synchronization via FreeRTOS queue primitives
 
 **Latency Analysis**:
@@ -392,6 +392,6 @@ while (estimatorDequeue(&m)) {  // Non-blocking, returns false if queue empty
 3. **Kalman task flush**
    - `updateQueuedMeasurements()` pulls the entries and calls the matching `kalmanCoreUpdateWith*()` function. Robust variants (`robustTwr`, `robustTdoa`) are selected via parameters.
 4. **State export**
-   - After `kalmanCoreFinalize()` and supervisor checks, `kalmanCoreExternalizeState()` fills `taskEstimatorState`. The stabilizer loop reads it on its next 1 kHz iteration and feeds controllers, the commander, health monitors and logging.
+   - After `kalmanCoreFinalize()` and supervisor checks, `kalmanCoreExternalizeState()` fills `publishedEstimatorState`. The stabilizer loop reads it on its next 1 kHz iteration and feeds controllers, the commander, health monitors and logging.
 5. **Logging/params**
    - `estimator_kalman.c` exposes EKF states, covariance diagonals and quaternion components via the `kalman` log group, and all tunable noises via the `kalman` parameter group (`pNAcc_xy`, `robustTdoa`, etc.).

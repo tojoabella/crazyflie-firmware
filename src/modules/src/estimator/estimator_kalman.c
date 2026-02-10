@@ -73,7 +73,7 @@
  *
  * This module splits estimator work into two cooperating contexts:
  *
- * - `estimatorKalman()` runs in the **stabilizer/control loop**
+ * - `estimatorKalman()` runs in the **stabilizer/control loop** via stateEstimator (estimator.c)
  *   (high-rate, latency-sensitive). It:
  *     1) acquires the mutex guarding the estimator's simple snapshot of the state,
  *     2) copies the state
