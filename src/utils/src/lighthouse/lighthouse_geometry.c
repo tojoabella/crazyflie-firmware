@@ -34,6 +34,45 @@
  * lighthouseGeometry.c: lighthouse tracking system geometry functions
  */
 
+/**
+ * @file lighthouse_geometry.c
+ * @brief 3D geometric calculations for Lighthouse positioning.
+ *
+ * This module provides the mathematical foundations for converting Lighthouse
+ * sweep angle measurements into 3D positions. It handles:
+ *
+ * Ray Construction:
+ *   Each pair of sweep angles (horizontal, vertical) defines a ray from the
+ *   base station into 3D space. lighthouseGeometryGetRay() constructs this ray:
+ *   1. Create normal vectors to the horizontal and vertical sweep planes
+ *   2. Cross product gives the ray direction (intersection of planes)
+ *   3. Rotate into world frame using base station orientation matrix
+ *
+ * Position from Ray Intersection:
+ *   With two base stations, we have two rays that should intersect at the
+ *   sensor position. lighthouseGeometryGetPositionFromRayIntersection() finds
+ *   the closest point between the rays (they rarely intersect exactly due to noise).
+ *   Returns false if rays are parallel (degenerate case).
+ *
+ * Plane-Vector Intersection:
+ *   lighthouseGeometryIntersectionPlaneVector() finds where a ray intersects
+ *   a plane (e.g., the deck plane). Used for yaw estimation by projecting
+ *   rays onto the Crazyflie's deck plane.
+ *
+ * Yaw Estimation:
+ *   lighthouseGeometryYawDelta() computes the yaw error between expected and
+ *   measured sensor positions. Uses the angle between diagonal vectors of
+ *   the sensor rectangle.
+ *
+ * Coordinate Systems:
+ *   - Base station frame: X forward (laser direction), Y right, Z up
+ *   - World frame: User-defined, stored in baseStationGeometry_t
+ *   - Body frame: Crazyflie-centered, X forward, Y left, Z up
+ *
+ * @note Algorithm adapted from ashtuchkin's Vive DIY position sensor project.
+ * @see lighthouse_position_est.c for usage of these geometric functions
+ */
+
 #include "lighthouse_geometry.h"
 #include "cf_math.h"
 

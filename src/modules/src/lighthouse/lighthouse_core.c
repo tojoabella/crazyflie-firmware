@@ -25,6 +25,30 @@
  * lighthouse_core.c - central part of the lighthouse positioning system
  */
 
+/**
+ * @file lighthouse_core.c
+ * @brief Central orchestration of the Lighthouse positioning system.
+ *
+ * Responsibilities:
+ * - Run the lighthouse FreeRTOS task that receives UART frames from the FPGA decoder.
+ * - Dispatch frames to the appropriate pulse processor (V1 or V2 protocol).
+ * - Handle OOTX calibration data decoding and storage.
+ * - Apply calibration corrections to raw sweep angles.
+ * - Throttle measurement rate for V2 systems to avoid estimator overload.
+ * - Send calibrated measurements to the position estimator via sweep angle or crossing-beam methods.
+ * - Manage status bitmaps and LED indicators for system health.
+ * - Provide logging variables and parameters for debugging and configuration.
+ *
+ * Data Flow:
+ *   FPGA (UART1) → getUartFrameRaw() → processFrame() → pulseProcessorProcessPulse()
+ *     → pulseProcessorApplyCalibration() → lighthousePositionEstimatePoseSweep()
+ *     → estimatorEnqueueSweepAngles() / estimatorEnqueueYawError()
+ *
+ * Threading:
+ *   Single FreeRTOS task (lighthouseCoreTask) processes all frames sequentially.
+ *   LED status is updated via a hardware timer callback (lighthouseCoreLedTimer).
+ */
+
 #include "stm32fxxx.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -148,6 +172,12 @@ static void modifyBit(uint16_t *bitmap, const int index, const bool value) {
   }
 }
 
+/**
+ * @brief Initialize the lighthouse core subsystem.
+ *
+ * Loads system type (V1/V2) from persistent storage, initializes the position
+ * estimator, and marks all base stations as potentially available.
+ */
 void lighthouseCoreInit() {
   lighthouseStorageInitializeSystemTypeFromStorage();
   lighthousePositionEstInit();
@@ -157,6 +187,14 @@ void lighthouseCoreInit() {
   }
 }
 
+/**
+ * @brief Timer callback to update LED status indicators on the Lighthouse deck.
+ *
+ * Called periodically by a hardware timer. Sets LEDs based on systemStatus:
+ * - statusNotReceiving: Orange LED solid (no pulses)
+ * - statusMissingData: Orange LED blinking (missing geo/calib)
+ * - statusToEstimator: Green LED solid (working normally)
+ */
 void lighthouseCoreLedTimer()
 {
   if (deckIsFlashed){
@@ -189,6 +227,12 @@ void lighthouseCoreLedTimer()
   }
 }
 
+/**
+ * @brief Update pulse processor when system type changes.
+ *
+ * Switches between V1 and V2 pulse processors, clears internal state,
+ * and persists the new system type to storage.
+ */
 static void lighthouseUpdateSystemType() {
   // Switch to new pulse processor
   switch (systemType)
@@ -230,6 +274,16 @@ void lighthouseCoreSetSystemType(const lighthouseBaseStationType_t type)
 }
 
 #define OPTIMIZE_UART1_ACCESS 1
+/**
+ * @brief Read a 12-byte frame from the FPGA via UART.
+ *
+ * Parses the raw bytes into a lighthouseUartFrame_t structure containing
+ * sensor index, timestamp, pulse width (V1), and channel/offset/beamData (V2).
+ * Detects sync frames (all 0xFF bytes) for frame alignment.
+ *
+ * @param frame Output structure to fill with parsed frame data.
+ * @return true if frame is valid (sync or proper data frame), false if corrupted.
+ */
 TESTABLE_STATIC bool getUartFrameRaw(lighthouseUartFrame_t *frame) {
   static char data[UART_FRAME_LENGTH];
   int syncCounter = 0;
@@ -282,6 +336,12 @@ TESTABLE_STATIC bool getUartFrameRaw(lighthouseUartFrame_t *frame) {
   return isFrameValid;
 }
 
+/**
+ * @brief Wait for UART frame synchronization.
+ *
+ * Blocks until receiving UART_FRAME_LENGTH consecutive 0xFF bytes,
+ * indicating frame boundary alignment with the FPGA.
+ */
 TESTABLE_STATIC void waitForUartSynchFrame() {
   char c;
   int syncCounter = 0;
@@ -308,6 +368,14 @@ void lighthouseCoreSetLeds(lighthouseCoreLedState_t red, lighthouseCoreLedState_
   uart1SendData(2, commandBuffer);
 }
 
+/**
+ * @brief Find another base station with valid measurements for crossing-beam estimation.
+ *
+ * @param angles Current measurement results from all base stations.
+ * @param baseStation The base station to find a pair for.
+ * @param otherBaseStation Output: index of the other base station if found.
+ * @return true if another base station with valid measurements was found.
+ */
 bool findOtherBaseStation(const pulseProcessorResult_t* angles, const int baseStation, int* otherBaseStation) {
   for (int candidate = baseStation + 1; candidate != baseStation; candidate++) {
     if (candidate >= CONFIG_DECK_LIGHTHOUSE_MAX_N_BS) {
@@ -338,6 +406,12 @@ static uint8_t estimationMethod = 1;
 #endif
 
 
+/**
+ * @brief Process sweep angles using crossing-beam position estimation.
+ *
+ * Finds a second base station with valid measurements and computes position
+ * via ray intersection. Used when estimationMethod == 0.
+ */
 static void usePulseResultCrossingBeams(pulseProcessor_t *appState, pulseProcessorResult_t* angles, int baseStation) {
   pulseProcessorClearOutdated(appState, angles, baseStation);
 
@@ -369,6 +443,12 @@ static void usePulseResultCrossingBeams(pulseProcessor_t *appState, pulseProcess
   }
 }
 
+/**
+ * @brief Process sweep angles by sending them directly to the estimator.
+ *
+ * Sends calibrated sweep angles as measurements to the Kalman filter.
+ * Used when estimationMethod == 1 (default).
+ */
 static void usePulseResultSweeps(pulseProcessor_t *appState, pulseProcessorResult_t* angles, int baseStation) {
   STATS_CNT_RATE_EVENT_DEBUG(&cycleRate);
 
@@ -379,6 +459,12 @@ static void usePulseResultSweeps(pulseProcessor_t *appState, pulseProcessorResul
   pulseProcessorProcessed(angles, baseStation);
 }
 
+/**
+ * @brief Convert V2 tilted-beam angles to V1-equivalent horizontal/vertical angles.
+ *
+ * V2 base stations have rotors tilted ±30°. This converts those angles to
+ * the V1 format for compatibility with the crossing-beam estimator.
+ */
 static void convertV2AnglesToV1Angles(pulseProcessorResult_t* angles) {
   for (int sensor = 0; sensor < PULSE_PROCESSOR_N_SENSORS; sensor++) {
     for (int bs = 0; bs < CONFIG_DECK_LIGHTHOUSE_MAX_N_BS; bs++) {
@@ -395,6 +481,19 @@ static void convertV2AnglesToV1Angles(pulseProcessorResult_t* angles) {
   }
 }
 
+/**
+ * @brief Main handler for processed sweep angle results.
+ *
+ * Called when a complete sweep (both axes) has been decoded. Applies calibration,
+ * converts V2 to V1 angles if needed, throttles V2 samples, and dispatches to
+ * the appropriate estimation method (crossing-beams or sweep-angles).
+ *
+ * @param appState Pulse processor state containing calibration and geometry.
+ * @param angles Decoded angle measurements.
+ * @param baseStation Index of the base station that produced these angles.
+ * @param sweepId Which sweep axis (0=first/X, 1=second/Y).
+ * @param now_ms Current timestamp in milliseconds.
+ */
 static void usePulseResult(pulseProcessor_t *appState, pulseProcessorResult_t* angles, int baseStation, int sweepId, const uint32_t now_ms) {
   const uint16_t baseStationBitMap = (1 << baseStation);
   baseStationReceivedMapWs |= baseStationBitMap;
@@ -445,6 +544,13 @@ static void usePulseResult(pulseProcessor_t *appState, pulseProcessorResult_t* a
   }
 }
 
+/**
+ * @brief Process newly decoded OOTX calibration data.
+ *
+ * When an OOTX frame is fully decoded, extracts calibration parameters
+ * and stores them. If the data differs from previously stored values,
+ * persists to flash storage.
+ */
 static void useCalibrationData(pulseProcessor_t *appState) {
   for (int baseStation = 0; baseStation < CONFIG_DECK_LIGHTHOUSE_MAX_N_BS; baseStation++) {
     if (appState->ootxDecoder[baseStation].isFullyDecoded) {
@@ -467,6 +573,18 @@ static void useCalibrationData(pulseProcessor_t *appState) {
   }
 }
 
+/**
+ * @brief Process a single UART frame from the FPGA.
+ *
+ * Dispatches to the appropriate pulse processor (V1 or V2), handles
+ * decoded calibration data, and triggers position estimation when
+ * complete sweep data is available.
+ *
+ * @param appState Pulse processor state.
+ * @param angles Output angle measurements.
+ * @param frame The UART frame to process.
+ * @param now_ms Current timestamp in milliseconds.
+ */
 static void processFrame(pulseProcessor_t *appState, pulseProcessorResult_t* angles, const lighthouseUartFrame_t* frame, const uint32_t now_ms) {
     int baseStation;
     int sweepId;
@@ -484,6 +602,16 @@ static void processFrame(pulseProcessor_t *appState, pulseProcessorResult_t* ang
     }
 }
 
+/**
+ * @brief Check health of the Lighthouse deck sensors.
+ *
+ * Tracks which of the 4 IR sensors have reported data. After a timeout
+ * (MAX_WAIT_TIME_FOR_HEALTH_MS), reports any missing sensors.
+ *
+ * @param appState Pulse processor state with health tracking fields.
+ * @param frame Current frame (used to mark sensor as active).
+ * @param now_ms Current timestamp in milliseconds.
+ */
 static void deckHealthCheck(pulseProcessor_t *appState, const lighthouseUartFrame_t* frame, const uint32_t now_ms) {
   if (!appState->healthDetermined) {
     if (0 == appState->healthFirstSensorTs) {
@@ -511,6 +639,12 @@ static void deckHealthCheck(pulseProcessor_t *appState, const lighthouseUartFram
   }
 }
 
+/**
+ * @brief Update system status bitmaps for logging and LED indication.
+ *
+ * Periodically copies working-set status variables to logged versions
+ * and resets the working-set for the next interval.
+ */
 static void updateSystemStatus(const uint32_t now_ms) {
   if (now_ms > nextUpdateTimeOfSystemStatus) {
     baseStationAvailabledMap = baseStationAvailabledMapWs;
@@ -533,6 +667,20 @@ static void updateSystemStatus(const uint32_t now_ms) {
   }
 }
 
+/**
+ * @brief Main FreeRTOS task for the Lighthouse positioning system.
+ *
+ * Initializes UART communication with the FPGA, loads geometry and calibration
+ * data from storage, and enters the main processing loop. Each iteration:
+ * 1. Waits for UART frame synchronization
+ * 2. Reads frames from the FPGA
+ * 3. Processes each frame through the pulse processor
+ * 4. Updates system status and health checks
+ *
+ * This task runs continuously until the system is shut down.
+ *
+ * @param param Unused FreeRTOS task parameter.
+ */
 void lighthouseCoreTask(void *param) {
   bool isUartFrameValid = false;
 

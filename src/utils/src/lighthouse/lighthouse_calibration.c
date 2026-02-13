@@ -30,6 +30,47 @@
  * lighthouse_calibration.c: lighthouse positioning angle calibration
  */
 
+/**
+ * @file lighthouse_calibration.c
+ * @brief Distortion correction for Lighthouse sweep angle measurements.
+ *
+ * Each Lighthouse base station has manufacturing imperfections in its optical
+ * system that introduce systematic errors in angle measurements. This module
+ * applies calibration corrections to convert raw (distorted) angles to
+ * accurate geometric angles.
+ *
+ * Distortion Model Parameters (per sweep/rotor):
+ *   - phase:     Fixed angular offset (radians)
+ *   - tilt:      Sweep plane tilt angle (radians)
+ *   - curve:     Quadratic lens distortion coefficient
+ *   - gibmag:    2nd harmonic oscillation magnitude (mechanical vibration)
+ *   - gibphase:  2nd harmonic phase offset
+ *   - ogeemag:   3rd harmonic magnitude (V2 only)
+ *   - ogeephase: 3rd harmonic phase (V2 only)
+ *
+ * Correction Algorithm:
+ *   The distortion model is non-linear, so direct inversion is not possible.
+ *   Instead, we use iterative Newton-Raphson refinement:
+ *
+ *   1. Start with the raw angle as the initial estimate
+ *   2. Apply the forward distortion model to get predicted distorted angle
+ *   3. Compute error: delta = raw - predicted
+ *   4. Update estimate: estimate += delta
+ *   5. Repeat until delta < 0.0005 rad (~0.03°) or max 5 iterations
+ *
+ *   Convergence is typically achieved in 2-3 iterations.
+ *
+ * Forward Model Functions:
+ *   - lighthouseCalibrationMeasurementModelLh1(): V1 distortion model
+ *   - lighthouseCalibrationMeasurementModelLh2(): V2 distortion model (includes rotor tilt)
+ *
+ *   These are used both for calibration application (inverse problem) and
+ *   in the Kalman filter for computing measurement Jacobians.
+ *
+ * @see docs/lighthouse/CALIBRATION.md for detailed documentation
+ * @see ootx_decoder.c for calibration data reception
+ */
+
 #include "lighthouse_calibration.h"
 
 #include <math.h>

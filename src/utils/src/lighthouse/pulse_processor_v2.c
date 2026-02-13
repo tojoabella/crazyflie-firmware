@@ -26,6 +26,49 @@
  *
  */
 
+/**
+ * @file pulse_processor_v2.c
+ * @brief Pulse processor for Lighthouse V2 (SteamVR 2.0) base stations.
+ *
+ * The V2 protocol differs fundamentally from V1:
+ * - No synchronization pulses - base stations transmit continuously
+ * - Each base station uses a unique channel (frequency/timing) for identification
+ * - Two rotors are tilted ±30° from vertical, sweeping simultaneously
+ * - Channel identification is embedded in the laser pulse timing pattern
+ *
+ * Key Processing Steps:
+ * 1. **Frame Collection**: Frames from all 4 sensors are grouped into "blocks"
+ *    based on timestamp proximity (within MAX_TICKS_SENSOR_TO_SENSOR).
+ *
+ * 2. **Channel Augmentation**: The FPGA may not decode channel for every frame.
+ *    augmentFramesInWorkspace() propagates known channels to adjacent frames.
+ *
+ * 3. **Block Validation**: A valid block requires:
+ *    - All 4 sensors present (sensorMask == 0xf)
+ *    - Consistent channel across all frames
+ *    - Exactly one frame with a decoded offset
+ *
+ * 4. **Block Pairing**: V2 requires two consecutive blocks from the same channel
+ *    to compute angles. One block captures first rotor, the next captures second.
+ *
+ * 5. **Angle Calculation**: From the two offset values per sensor:
+ *    - firstBeam  = (offset1 * 2π / period) - π + π/3
+ *    - secondBeam = (offset2 * 2π / period) - π - π/3
+ *    The ±π/3 terms account for the ±30° rotor tilt.
+ *
+ * Channel Periods (24 MHz clock, derived from 48 MHz base station clock):
+ *   Channel 0: 479500 ticks (~19.98 ms)
+ *   Channel 15: 443500 ticks (~18.48 ms)
+ *   Each channel has a unique period for identification.
+ *
+ * OOTX Extraction:
+ *   The slowBit field carries calibration data at ~1.4 bits/second.
+ *   Rate-limited by MIN_TICKS_BETWEEN_SLOW_BITS to avoid duplicates.
+ *
+ * @see pulse_processor_v1.c for V1 protocol implementation
+ * @see docs/lighthouse/V1_VS_V2.md for protocol comparison
+ */
+
 #include "pulse_processor_v2.h"
 
 #include <string.h>

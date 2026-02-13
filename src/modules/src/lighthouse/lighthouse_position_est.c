@@ -25,6 +25,42 @@
  * lighthouse_position_est.c - position estimaton for the lighthouse system
  */
 
+/**
+ * @file lighthouse_position_est.c
+ * @brief Position estimation interface between Lighthouse and the state estimator.
+ *
+ * This module bridges processed Lighthouse angle measurements and the Kalman filter.
+ * It supports two estimation methods:
+ *
+ * 1. **Crossing Beams Method** (estimatePositionCrossingBeams):
+ *    - Uses two base stations simultaneously
+ *    - Computes 3D position from ray intersections
+ *    - Requires all 4 sensors to have valid measurements from both base stations
+ *    - Produces direct position measurements with ~1cm accuracy
+ *
+ * 2. **Sweep Angles Method** (estimatePositionSweeps):
+ *    - Uses a single base station
+ *    - Feeds individual sweep angle measurements to the Kalman filter
+ *    - The Kalman filter fuses these with IMU data for position estimation
+ *    - More robust when only one base station is visible
+ *
+ * The module also handles:
+ * - Geometry data management (base station position/orientation)
+ * - Calibration data management
+ * - Memory module interface for PC client read/write of geometry/calibration
+ * - Yaw estimation from Lighthouse data
+ *
+ * Sensor Layout:
+ *   Sensors are at corners of a 30mm x 15mm rectangle centered on the deck:
+ *   - Sensor 0: (-15mm, +7.5mm)  (front-left)
+ *   - Sensor 1: (-15mm, -7.5mm)  (front-right)
+ *   - Sensor 2: (+15mm, +7.5mm)  (back-left)
+ *   - Sensor 3: (+15mm, -7.5mm)  (back-right)
+ *
+ * @see lighthouse_geometry.c for ray intersection mathematics
+ * @see estimator_kalman.c for Kalman filter sweep angle processing
+ */
+
 #include "stabilizer_types.h"
 #include "estimator.h"
 #include "estimator_kalman.h"

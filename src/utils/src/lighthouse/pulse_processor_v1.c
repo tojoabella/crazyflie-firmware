@@ -26,6 +26,34 @@
  *
  */
 
+/**
+ * @file pulse_processor_v1.c
+ * @brief Pulse decoder for Lighthouse V1 (HTC Vive) base stations.
+ *
+ * V1 Protocol Overview:
+ * - Two base stations alternate, each operating at ~60 Hz (8.333 ms frame period).
+ * - Each frame contains: sync0 pulse, sync1 pulse, X sweep, Y sweep.
+ * - Sync pulses are omnidirectional IR flashes; width encodes axis and OOTX data.
+ * - Sweep pulses are narrow laser detections; timing relative to sync gives angle.
+ *
+ * Synchronization:
+ * - Collects pulse history (8 pulses per sensor) to detect sync pattern.
+ * - Matches pulse widths against SYNC_MIN_WIDTH to SYNC_MAX_WIDTH range.
+ * - Once synchronized, extracts timing to compute sweep angles.
+ *
+ * Angle Calculation:
+ *   angle = (sweepTs - syncTs) * 2π / frameWidth - π
+ *
+ * OOTX Extraction:
+ * - Bit 1 of sync pulse width offset carries OOTX data.
+ * - Fed to ootxDecoderProcessBit() for calibration frame assembly.
+ *
+ * Key Constants (24 MHz clock):
+ * - FRAME_LENGTH: 200,000 ticks (8.333 ms)
+ * - SYNC_BASE_WIDTH: 1,250 ticks (~52 µs)
+ * - SWEEP_MAX_WIDTH: 512 ticks (~21 µs)
+ */
+
 #include "pulse_processor_v1.h"
 
 #include <string.h>

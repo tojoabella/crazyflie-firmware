@@ -26,6 +26,20 @@
  *
  */
 
+/**
+ * @file pulse_processor.c
+ * @brief Common pulse processor utilities shared between V1 and V2 protocols.
+ *
+ * Responsibilities:
+ * - Apply calibration corrections to raw sweep angles (V1 and V2 models).
+ * - Clear outdated angle data when base stations or sensors become occluded.
+ * - Track which base stations have been received for cycle detection.
+ * - Provide utility functions for angle quality reporting.
+ *
+ * This file does not decode pulses itself; that is handled by protocol-specific
+ * implementations in pulse_processor_v1.c and pulse_processor_v2.c.
+ */
+
 #include "pulse_processor.h"
 #include "pulse_processor_v1.h"
 #include "pulse_processor_v2.h"
